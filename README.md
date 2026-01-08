@@ -54,7 +54,7 @@ date:([* TO 1930-12-31]) AND format:(PDF) AND -collection:(community OR opensour
       field you see in that XML list (e.g., curation) may be used as a filter in the Advanced
       Search bar to find other books processed in the exact same batch or facility.
 
-To use Analog eBooks, simply unzip the zipped folder from the 'Releases' section in a location 
+To use Analog eBooks, simply unzip the zipped folder from the ['Releases'](https://github.com/LPBeaulieu/Analog-eBooks/releases/) section in a location 
 where you have permissions access, such as 'Documents', and NOT 'Windows' nor 'Program Files', 
 as the code will need to have writing access to generate PDFs and modify the JSON file holding 
 all of your settings. There should be an 'Original Book PDF File' subfolder (in which you will 
