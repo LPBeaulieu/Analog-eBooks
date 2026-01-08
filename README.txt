@@ -1,7 +1,7 @@
 # Analog eBooks
 This CLI application removes the page color and crops the text from scanned PDF books so that you could read them on your e-reader!
 
-![Analog eBooks Demo](https://github.com/LPBeaulieu/Typewriter-OCR-TintypeText/blob/main/TintypeText%20basic%20rtf%20mode%20screenshot.jpg)
+![Analog eBooks Demo](https://github.com/LPBeaulieu/Analog-eBooks/blob/main/Analog%20eBooks%20Demo.png)
 <h3 align="center">Analog eBooks</h3>
 <div align="center">
   
@@ -304,4 +304,5 @@ that you will need to adjust in most cases).
     - Auto-Padding ON/OFF
 
 Happy reading!
+
 
