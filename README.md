@@ -9,9 +9,13 @@ This CLI application removes the page color and crops the text from scanned PDF 
   
 </div>
 
+## 📝 Table of Contents
+- [Getting Started](#getting_started)
+- [Usage](#usage)
+- [Author](#author)
+- [Acknowledgments](#acknowledgments)
 
-=== README ===
-
+## 🏁 Getting Started <a name = "getting_started"></a>
 Analog eBooks is a Command-Line Interface (CLI) application that allows to process high-quality
 book scans (pages being already deskewed and cropped to remove most of the shadows on
 the edges of the pages). It is most useful when generating simple grayscale PDF
@@ -20,8 +24,9 @@ documents that can readily be read on e-readers.
 To find such high-quality book scans, head over to https://archive.org/details/internetarchivebooks 
 and use the following targeted query in your Internet Archive search (please consider donating to 
 Internet Archive to help their archiving efforts!):
-  date:([* TO 1930-12-31]) AND format:(PDF) AND -collection:(community OR opensource) AND (title:("Book Title") OR description:("Book Title")) AND creator:("Author Name")
-
+```
+date:([* TO 1930-12-31]) AND format:(PDF) AND -collection:(community OR opensource) AND (title:("Book Title") OR description:("Book Title")) AND creator:("Author Name")
+```
   - 'date:([* TO 1930-12-31])': Will only include results that are now in the public domain (adjust the date accordingly, which increases
     the chance of you being able to download a PDF (I do not condone pirating books, so please limit yourself to public domain works).
   - 'format:(PDF)': Will only include results that have a downloadable PDF version.
@@ -48,7 +53,7 @@ Internet Archive to help their archiving efforts!):
       scroll to the bottom of its page and click "All Files". Open the '_meta.xml' file. Any
       field you see in that XML list (e.g., curation) may be used as a filter in the Advanced
       Search bar to find other books processed in the exact same batch or facility.
-      
+
 To use Analog eBooks, simply unzip the zipped folder in a location where you have permissions 
 access, such as 'Documents', and NOT 'Windows' nor 'Program Files', as the code will need to
 have writing access to generate PDFs and modify the JSON file holding all of your settings.
@@ -57,6 +62,17 @@ PDF file) and a 'Final Book PDF Files' subfolder (where Analog eBooks will gener
 within the unzipped folder. Simply place a scanned book pdf in the 'Original Book PDF File' folder,  
 double-click on 'Analog eBooks.exe' you're ready to go!
 
+Should you instead wish to run the source code file ('Analog eBooks.py'), you would need to 
+install its dependencies, namely NumPy and PyMuPDF:
+```
+py -m pip install numpy pymupdf
+```
+You would then run the code as follows:
+```
+py "Analog eBooks.py"
+```
+
+## 🎈 Usage <a name="usage"></a>  
 The default settings should work well for most books, where you will only need to specify the first 
 and last pages in the 'Page Management' menu (main menu item 2). I would recommend skipping over all 
 of the front matter and starting at the first page of the body text, as pages that don't have much text 
@@ -304,5 +320,15 @@ that you will need to adjust in most cases).
     - Auto-Padding ON/OFF
 
 Happy reading!
+
+## ✍️ Authors <a name = "author"></a>
+- 👋 Hi, I’m Louis-Philippe!
+- 👀 I’m interested in natural language processing (NLP) and anything to do with words, really! 📝
+- 🌱 I’m currently reading about deep learning (and reviewing the underlying math involved in coding such applications 🧮😕)
+- 📫 How to reach me: By e-mail! LPBeaulieu@gmail.com 💻
+
+
+## 🎉 Acknowledgments <a name = "acknowledgments"></a>
+- Hat tip to [@kylelobo](https://github.com/kylelobo) for the GitHub README template!
 
 
