@@ -292,7 +292,7 @@ that you will need to adjust in most cases).
 
   Relevant KOReader links:
     - https://koreader.rocks/
-    - github.com/koreader/koreader/wiki/Installation-on-Kobo-devices
+    - https://github.com/koreader/koreader/wiki/Installation-on-Kobo-devices
 
 - You may change all of these settings through the Command-Line Interface (CLI) menu system, 
   or by directly modifying the 'settings.json' JSON file that is located in he application's 
