@@ -54,13 +54,13 @@ date:([* TO 1930-12-31]) AND format:(PDF) AND -collection:(community OR opensour
       field you see in that XML list (e.g., curation) may be used as a filter in the Advanced
       Search bar to find other books processed in the exact same batch or facility.
 
-To use Analog eBooks, simply unzip the zipped folder in a location where you have permissions 
-access, such as 'Documents', and NOT 'Windows' nor 'Program Files', as the code will need to
-have writing access to generate PDFs and modify the JSON file holding all of your settings.
-There should be an 'Original Book PDF File' subfolder (in which you will place the original scanned book 
-PDF file) and a 'Final Book PDF Files' subfolder (where Analog eBooks will generate the PDF documents)
-within the unzipped folder. Simply place a scanned book pdf in the 'Original Book PDF File' folder,  
-double-click on 'Analog eBooks.exe' you're ready to go!
+To use Analog eBooks, simply unzip the zipped folder from the 'Releases' section in a location 
+where you have permissions access, such as 'Documents', and NOT 'Windows' nor 'Program Files', 
+as the code will need to have writing access to generate PDFs and modify the JSON file holding 
+all of your settings. There should be an 'Original Book PDF File' subfolder (in which you will 
+place the original scanned book PDF file) and a 'Final Book PDF Files' subfolder (where Analog 
+eBooks will generate the PDF documents) within the unzipped folder. Simply place a scanned book 
+pdf in the 'Original Book PDF File' folder, double-click on 'Analog eBooks.exe' you're ready to go!
 
 Should you instead wish to run the source code file ('Analog eBooks.py'), you would need to 
 install its dependencies, namely NumPy and PyMuPDF:
