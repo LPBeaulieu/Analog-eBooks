@@ -1,6 +1,9 @@
+
+
 import copy
 from datetime import datetime
 import glob
+import hashlib
 import json
 import math
 import numpy as np
@@ -45,48 +48,145 @@ def write_entry_in_error_log():
 #average value of a list of digits, provided that the list
 #isn't empty, in which case it will return "None".
 def get_list_average_value(list_of_digits):
-    length_of_list_of_digits = len(list_of_digits)
-    if length_of_list_of_digits > 0: 
-        return round(sum(list_of_digits)/length_of_list_of_digits)
+    length_list_of_digits = len(list_of_digits)
+    if length_list_of_digits > 0: 
+        #return round(sum(list_of_digits)/length_list_of_digits)
+        return round(sum(list_of_digits)/length_list_of_digits)
+    else:
+        return None
+
+#The function "get_list_standard_deviation_value()" will return the
+#standard deviation value of a list of digits, provided that the list
+#isn't empty, in which case it will return "None".       
+def get_list_standard_deviation_value(list_of_digits):
+    length_list_of_digits = len(list_of_digits)
+    if length_list_of_digits > 0:
+        list_mean = get_list_average_value(list_of_digits)
+        sum_of_the_squared_deviation_from_the_mean = 0
+        for digit in list_of_digits:
+            sum_of_the_squared_deviation_from_the_mean += math.pow((digit - list_mean), 2)
+        return math.sqrt(sum_of_the_squared_deviation_from_the_mean/(length_list_of_digits - 1))
     else:
         return None
 
 
-#The "process_image()" function will extract the image file from the
-#PDF document as a grayscale Pixmap object, convert it to a NumPy array 
-#to process it, and then convert the NumPy array back to a Pixmap object,
+#The "rasterize_image()" function will extract the image from the current
+#page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+#array to process it, and then convert the NumPy array back to a Pixmap object,
 #which will be included in the "doc_output" Document object.
-def process_image(  doc,
-                    doc_output,
+def rasterize_image(  doc,
+                      doc_output,
+                      page_index, 
+                      dpi_setting,
+                      cumulative_pdf_file_size_estimation,
+                      black_and_white_mode_enabled,
+                      is_dark_mode_enabled
+                    ):
+
+    #The current page of the PDF document
+    #is stored in the "page" variable.
+    page = doc[page_index]
+
+    #A Grayscale Pixmap object with "csGRAY" colorspace
+    #and the provided "dpi_setting" is created from the
+    #"page" object.
+    pixmap = page.get_pixmap(colorspace=pymupdf.csGRAY, dpi=dpi_setting)
+
+    #The NumPy array of the current "Pixmap" object will only need
+    #to be obtained if the user has turned on the "Black and White"
+    #or the "Dark" modes on, as we then need to manipulate the pixel
+    #grayscale values. 
+    if black_and_white_mode_enabled or is_dark_mode_enabled:
+        #The "pixmap" Pixmap object is converted to a NumPy array for filtering out 
+        #yellow pixels (since it is a grayscale pixmap, the number of color channels "pixmap.n" == 1):
+        img_array_view = np.frombuffer(pixmap.samples_mv, dtype=np.uint8).reshape(pixmap.h, pixmap.w, pixmap.n)
+
+        #As the grayscale NumPy array was obtained through PyMuPDF,
+        #It has the following shape: (Height, Width, 1), which needs
+        #to be squeezed into a (Height, Width) 2D array with the 
+        #"np.squeeze()" method before doing any transformations
+        #on the data.
+        img_array_view = np.squeeze(img_array_view)
+
+        #A copy is made of the image array view, as modifications will be made to it.
+        img_array = img_array_view.copy()
+
+        #The "black and white" mode needs to be dealt with
+        #before the "dark mode", as otherwise the code
+        #"img_array[img_array != 255] = 0" would only work 
+        #if "dark_mode_enabled == False", and the code
+        #"img_array[img_array != 0] = 255" would be needed
+        #when "dark_mode_enabled == True", as the polarity
+        #would then be reversed (0 now being white and 255
+        #now being black).
+        if black_and_white_mode_enabled:
+            img_array[img_array != 255] = 0
+        #If the "dark mode" is enabled, the grayscale values
+        #will equal the difference between 255 and the initial
+        #grayscale value (after dealing with the "black and white"
+        #mode, see comment above). This will invert the polarity
+        #(0 now being white and 255 now being black).
+        if is_dark_mode_enabled:
+            img_array = 255 - img_array
+
+        #To convert the NumPy array back to a grayscale pixmap, it must
+        #first be converted into a bytestream that will be used in creating
+        #the "Pixmap" object.
+        samples_uint8 = img_array.astype(np.uint8).tobytes()
+
+        #The original "Pixmap" object is overwritten with a new
+        #"Pixmap" object derived from the bytestream from the
+        #modified NumPy array. 
+        #The shape is (height, width, 1), as it is in grayscale.
+        #To create a Pixmap from raw data, positional arguments must be provided 
+        #(without keywords such as "colorspace", "width" or "height")
+        pixmap = pymupdf.Pixmap(
+                    pymupdf.csGRAY, 
+                    img_array.shape[1], #Width (columns) 
+                    img_array.shape[0], #Height (rows)
+                    samples_uint8,
+                    False) #Indicates no alpha channel
+
+    #The value of "cumulative_pdf_file_size_estimation" is incremented
+    #with the length of the bytestream derived from "pixmap", as 
+    #an approximation of the current size of the PDF document. This 
+    #does not factor in the optimization steps that go into reducing
+    #the file of the final PDF document, however. You might need to
+    #specify a larger target file size to account for this.
+    cumulative_pdf_file_size_estimation += len(pixmap.tobytes())
+
+    #Create a new page with the same dimensions as the Pixmap object "pixmap"
+    new_page = doc_output.new_page(width=pixmap.width, height=pixmap.height)
+
+    #Insert the Pixmap object "pixmap" directly
+    #"rect" defines where the image goes (new_page.rect fills the whole page)
+    new_page.insert_image(new_page.rect, pixmap=pixmap)
+
+    return (doc_output, cumulative_pdf_file_size_estimation)
+
+
+#The "get_page_color_filter_threshold()" function will extract the image from the 
+#current page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+#array to calculate the initial mean grayscale pixel value for the page at the 
+#given value of "page_index" in the "doc" PDF document, as well as the standard 
+#deviation for the grayscale values distribution. Then, if the optional argument 
+#"is_appending_values_to_list" was set to "True" when calling the function, the 
+#page color filter threshold calculated from the mean grayscale value will be 
+#appended to the list "list_of_page_color_filter_thresholds" and nothing will 
+#be returned. Otherwise, the variables required to process the image will be 
+#returned.
+def get_page_color_filter_threshold(
+                    doc,
                     page_index,
-                    dpi_setting, 
-                    cumulative_pdf_file_size_estimation,                   
-                    do_filter_out_splotches_margins,
-                    number_of_standard_deviations_for_filtering_page_color_cropping,
-                    number_of_standard_deviations_for_filtering_page_color,
-                    number_of_standard_deviations_for_filtering_splotches_margins,
-                    do_filter_out_splotches_entire_page,
-                    number_of_standard_deviations_for_filtering_splotches_entire_page,
-                    black_and_white_mode_enabled,
-                    do_crop_pages,                
-                    horizontal_crop_kernel_size_height_percent,
-                    horizontal_crop_kernel_radius_kernel_size_percent,
-                    horizontal_crop_margin_buffer_width_percentage,
-                    vertical_crop_kernel_size_height_percent,
-                    vertical_crop_kernel_radius_kernel_size_percent,
-                    vertical_crop_margin_buffer_height_percentage,
-                    brightness_level,
-                    final_brightness_level,
-                    contrast_level,
-                    final_contrast_level,
-                    is_dark_mode_enabled,
+                    dpi_setting,
                     left_margin_width_percent,
                     right_margin_width_percent,
                     top_margin_height_percent,
-                    bottom_margin_height_percent,
-                    list_of_cropped_page_widths,
-                    set_of_potential_blank_pages,
-                    list_of_original_document_page_numbers
+                    bottom_margin_height_percent,                    
+                    number_of_standard_deviations_for_filtering_page_color,
+                    is_image_mode_on,
+                    list_of_page_color_filter_thresholds,
+                    is_appending_values_to_list = False                    
                   ):
     #The current page of the PDF document
     #is stored in the "page" variable.
@@ -117,41 +217,6 @@ def process_image(  doc,
 
     img_array_cropping = img_array_view.copy()
 
-    #The initial mean and standard deviation of all grayscale pixel values
-    #will be used to filter out the paper color pixels.
-    initial_mean_pixel_value = np.mean(img_array)
-    initial_pixel_value_standard_deviation = np.std(img_array)
-
-    #The pixels that are lighter than the mean value of all pixels found 
-    #on the page before any modifications are made to the numpy array, plus 
-    #"number_of_standard_deviations_for_filtering_page_color" times the standard
-    #deviation will be set to white (value of one). You may need to use a negative
-    #value for "number_of_standard_deviations_for_filtering_page_color" if the pages
-    #have significant yellowing around the edges, or if there is a shadow left behind
-    #by the spine. This will then filter out these pixels more aggressively.
-    img_array[img_array > initial_mean_pixel_value + number_of_standard_deviations_for_filtering_page_color * initial_pixel_value_standard_deviation] = 1
-
-    img_array_cropping[img_array_cropping > initial_mean_pixel_value + number_of_standard_deviations_for_filtering_page_color_cropping * initial_pixel_value_standard_deviation] = 1
-
-    #The brightness of the pixels is adjusted by multiplying all of the pixel values
-    #by the "brightness_level". Black pixels (zeroes) will be left untouched, as 
-    #anything multiplied by zero gives zero.
-    if brightness_level != 1 and brightness_level > 0:
-        img_array *= brightness_level
-        #Clip values to ensure they stay between zero and 1
-        #(in case the "brightness_level" value is greater than
-        #1 and the initial pixel value is greater than 0.5)
-        img_array = np.clip(img_array, 0.0, 1.0)
-
-        #The initial mean of all grayscale pixel values needs
-        #to be adjusted in the same way as the pixels were 
-        #brightened, in order to adjust the baseline average
-        #grayscale value that will be used when adjusting
-        #the contrast
-        initial_mean_pixel_value *= brightness_level
-        if initial_mean_pixel_value > 1.0:
-            initial_mean_pixel_value = 1.0
-
     ##The initial height and width of
     #the NumPy "img_array" are stored
     #in the "height" and "width" variables,
@@ -173,6 +238,156 @@ def process_image(  doc,
     center_of_page = img_array_cropping[slice_center_of_page]
 
     #The mean and standard deviation of all non-white pixels on the page will
+    #be used when calculating the initial mean pixel value on the page. If the PDF
+    #document was vector-based and not scanned, and the current page is a white page,
+    #then the value of "initial_mean_pixel_value" will be set to one (as it is a white 
+    #page comprising less than 30 non-white pixels), and the standard deviation of all 
+    #pixels on the page will be set to zero, once again because all pixels are white.
+    non_white_pixels_in_center_of_page = center_of_page[center_of_page != 1]
+
+    #A threshold of 30 non-white pixels in the center of the page is used to meet the minimal
+    #sample size for a normal distribution and obtain a reliable mean and standard deviation
+    #of a non-blank page (see the "if" below).
+    number_of_non_white_pixels_in_center_of_page = np.sum(non_white_pixels_in_center_of_page)
+
+    #A threshold of 30 non-white pixels in the center of the page is used to meet the minimal
+    #sample size for a normal distribution and obtain a reliable mean and standard deviation
+    #of a non-blank page. Below that threshold, the mean is set to one (white) and the standard 
+    #deviation is set to zero, as there are less than 30 non-white pixels to begin with.
+    if (number_of_non_white_pixels_in_center_of_page < 30):
+        initial_mean_pixel_value = 1.0
+        initial_pixel_value_standard_deviation = 0.0
+    else:
+        #The initial mean and standard deviation of all grayscale pixel values
+        #will be used to filter out the paper color pixels.
+        initial_mean_pixel_value = np.mean(img_array)
+        initial_pixel_value_standard_deviation = np.std(img_array)
+
+    #The pixels that are lighter than the mean value of all pixels found 
+    #on the page before any modifications are made to the numpy array, plus 
+    #"number_of_standard_deviations_for_filtering_page_color" times the standard
+    #deviation will be set to white (value of one). You may need to use a negative
+    #value for "number_of_standard_deviations_for_filtering_page_color" if the pages
+    #have significant yellowing around the edges, or if there is a shadow left behind
+    #by the spine. This will then filter out these pixels more aggressively.
+    page_color_filter_threshold = initial_mean_pixel_value + number_of_standard_deviations_for_filtering_page_color * initial_pixel_value_standard_deviation
+
+    #If the "get_page_color_filter_threshold()" function's optional argument
+    #"is_appending_values_to_list" was set to "True", then the value of 
+    #"page_color_filter_threshold" will be appended to the list 
+    #"list_of_page_color_filter_thresholds" and nothing will be 
+    #returned, as the function "get_page_color_filter_threshold()"
+    #is then being called solely to populate the list, which is 
+    #required for populating the list "list_of_full_page_filter_thresholds"
+    #when calling the "get_full_page_filter_threshold()" with the optional
+    #parameter "is_appending_values_to_list" being set to "True" in a 
+    #second step.
+    if (is_appending_values_to_list):
+        list_of_page_color_filter_thresholds.append(page_color_filter_threshold)
+        return
+    #Otherwise, all of the variables required for processing the current page will be returned.
+    else:
+        return (list_of_page_color_filter_thresholds, 
+            page_color_filter_threshold, 
+            initial_mean_pixel_value, 
+            initial_pixel_value_standard_deviation, 
+            img_array, 
+            img_array_cropping,  
+            height, 
+            width,
+            slice_center_of_page,
+            center_of_page,
+            number_of_non_white_pixels_in_center_of_page)
+
+
+#The "get_full_page_filter_threshold()" function will calculate the 
+#full-page filter threshold, which will be appended to the list 
+#"list_of_full_page_filter_thresholds" and nothing will be returned 
+#if the optional argument "is_appending_values_to_list" was set to 
+#"True" when calling the function. Otherwise, the variables required 
+#to process the image will be returned.
+def get_full_page_filter_threshold( 
+                                img_array,
+                                img_array_cropping,
+                                brightness_level,
+                                image_mode_multiplier,
+                                do_filter_out_splotches_margins,
+                                number_of_standard_deviations_for_filtering_page_color_cropping,
+                                number_of_standard_deviations_for_filtering_page_color,
+                                number_of_standard_deviations_for_filtering_splotches_margins,
+                                do_filter_out_splotches_entire_page,
+                                number_of_standard_deviations_for_filtering_splotches_entire_page,
+                                contrast_level,
+                                left_margin_width_percent,
+                                right_margin_width_percent,
+                                top_margin_height_percent,
+                                bottom_margin_height_percent,
+                                height,
+                                width,
+                                slice_center_of_page,
+                                center_of_page,
+                                is_image_mode_on,
+                                page_color_filter_threshold,
+                                list_of_page_color_filter_thresholds,
+                                list_of_full_page_filter_thresholds,
+                                initial_mean_pixel_value,
+                                initial_pixel_value_standard_deviation,
+                                is_appending_values_to_list = False
+                              ):
+
+    #The list "list_of_page_color_filter_thresholds" will hold the page color filter threshold
+    #values calculated for each page, calculated from each page's mean grayscale pixel value and 
+    #and corresponding standard deviation. In cases where images were included, these would be 
+    #significantly darker than the pages without images, and therefore the thresholds for these 
+    #pages would need to be capped to avoid filtering out too many pixels. If the calculated 
+    #threshold for the page color filter or the full page filter for that given page is lower 
+    #(darker) than the value of the mean of all corresponding threshold values for all pages,  
+    #plus "image_mode_multiplier" times the standard deviation of all threshold values for 
+    #all pages, then the threshold will be set to the latter value. This only happens if 
+    #the image mode is on ("is_image_mode_on == True").
+    if is_image_mode_on:
+        page_color_filter_threshold_cap = (get_list_average_value(list_of_page_color_filter_thresholds) + 
+        image_mode_multiplier * get_list_standard_deviation_value(list_of_page_color_filter_thresholds))
+
+        if page_color_filter_threshold < page_color_filter_threshold_cap:
+            page_color_filter_threshold = page_color_filter_threshold_cap      
+
+    #The pixels that are lighter than the mean value of all pixels found 
+    #on the page before any modifications are made to the numpy array, plus 
+    #"number_of_standard_deviations_for_filtering_page_color" times the standard
+    #deviation will be set to white (value of one). You may need to use a negative
+    #value for "number_of_standard_deviations_for_filtering_page_color" if the pages
+    #have significant yellowing around the edges, or if there is a shadow left behind
+    #by the spine. This will then filter out these pixels more aggressively.
+    img_array[img_array > page_color_filter_threshold] = 1
+
+    #The threshold cap does not apply to the NumPy array that will be used 
+    #to determine the cropping coordinates, as this array is deliberately
+    #filtered agressively in order to prevent blotches in the margins and 
+    #the spine shadow from interfering with the convolution step required 
+    #to determine the cropping coordinates.
+    img_array_cropping[img_array_cropping > initial_mean_pixel_value + number_of_standard_deviations_for_filtering_page_color_cropping * initial_pixel_value_standard_deviation] = 1
+
+    #The brightness of the pixels is adjusted by multiplying all of the pixel values
+    #by the "brightness_level". Black pixels (zeroes) will be left untouched, as 
+    #anything multiplied by zero gives zero.
+    if brightness_level != 1 and brightness_level > 0:
+        img_array *= brightness_level
+        #Clip values to ensure they stay between zero and 1
+        #(in case the "brightness_level" value is greater than
+        #1 and the initial pixel value is greater than 0.5)
+        img_array = np.clip(img_array, 0.0, 1.0)
+
+        #The initial mean of all grayscale pixel values needs
+        #to be adjusted in the same way as the pixels were 
+        #brightened, in order to adjust the baseline average
+        #grayscale value that will be used when adjusting
+        #the contrast
+        initial_mean_pixel_value *= brightness_level
+        if initial_mean_pixel_value > 1.0:
+            initial_mean_pixel_value = 1.0
+
+    #The mean and standard deviation of all non-white pixels on the page will
     #be used when filtering out the remaining blotches on the outer edges of 
     #the page (if "do_filter_out_splotches_margins == True").
     non_white_pixels_in_center_of_page = center_of_page[center_of_page != 1]
@@ -189,9 +404,11 @@ def process_image(  doc,
 
     #A threshold of 30 non-white pixels in the center of the page is used to meet the minimal
     #sample size for a normal distribution and obtain a reliable mean and standard deviation
-    #of a non-blank page.
+    #of a non-blank page. Therefore, on pages with less than 30 non-white pixels on the center
+    #of the page, no statistical analysis-driven pixel filtering can be performed, thus the 
+    #"pass" statement.
     if (number_of_non_white_pixels_in_center_of_page < 30):    
-        set_of_potential_blank_pages.add(page_index + 1)
+        pass
     #If the "do_filter_out_splotches" mode is enabled and the pixels at the center of the page
     #aren't all white ("not np.all(non_white_pixels_in_center_of_page == 1)"), the "if" statement
     #below will filter out the lighter gray pixels in the margins of the page.
@@ -289,9 +506,252 @@ def process_image(  doc,
             #non-white pixels in the center of the page, plus 
             #"number_of_standard_deviations_for_filtering_splotches_entire_page"
             #times the standard deviation of these pixels.
-            pixels_lighter_than_threshold = (img_array > mean_non_white_pixel_value + 
+            full_page_filter_threshold = (mean_non_white_pixel_value + 
                 number_of_standard_deviations_for_filtering_splotches_entire_page * standard_deviation_non_white_pixel_value)
-            img_array[pixels_lighter_than_threshold] = 1
+
+            #If the "get_full_page_filter_threshold()" function's optional argument
+            #"is_appending_values_to_list" was set to "True", then the value of 
+            #"full_page_filter_threshold" will be appended to the list 
+            #"list_of_full_page_filter_thresholds" and nothing will be 
+            #returned.    
+            if is_appending_values_to_list == True:
+                list_of_full_page_filter_thresholds.append(full_page_filter_threshold)
+                return
+
+            #If the "get_full_page_filter_threshold()" function's optional argument
+            #"is_appending_values_to_list" was set to "False", it means that the 
+            #"get_full_page_filter_threshold()" function was called in the 
+            #"process_image()" function, and therefore all of the variables 
+            #required for processing the current page will be returned.
+            return (img_array, 
+                    img_array_cropping, 
+                    initial_mean_pixel_value,
+                    mean_non_white_pixel_value,
+                    standard_deviation_non_white_pixel_value,
+                    list_of_full_page_filter_thresholds,
+                    full_page_filter_threshold)
+    #If the "do_filter_out_splotches_entire_page" mode isn't enabled (full page filter after 
+    #the page color filter step), then only the image array, the cropping image array,
+    #the initial mean pixel value will be returned, as no full-page filtering 
+    #(apart from the page color), will be applied.
+    return (img_array, 
+            img_array_cropping, 
+            initial_mean_pixel_value)
+
+
+#The "process_image()" function will extract the image from the current
+#page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+#array to process it, and then convert the NumPy array back to a Pixmap object,
+#which will be included in the "doc_output" Document object.
+def process_image(  doc,
+                    doc_output,
+                    page_index,
+                    dpi_setting, 
+                    cumulative_pdf_file_size_estimation,                   
+                    do_filter_out_splotches_margins,
+                    number_of_standard_deviations_for_filtering_page_color_cropping,
+                    number_of_standard_deviations_for_filtering_page_color,
+                    number_of_standard_deviations_for_filtering_splotches_margins,
+                    do_filter_out_splotches_entire_page,
+                    number_of_standard_deviations_for_filtering_splotches_entire_page,
+                    black_and_white_mode_enabled,
+                    do_crop_pages,                
+                    horizontal_crop_kernel_size_height_percent,
+                    horizontal_crop_kernel_radius_kernel_size_percent,
+                    horizontal_crop_margin_buffer_width_percentage,
+                    vertical_crop_kernel_size_height_percent,
+                    vertical_crop_kernel_radius_kernel_size_percent,
+                    vertical_crop_margin_buffer_height_percentage,
+                    brightness_level,
+                    final_brightness_level,
+                    contrast_level,
+                    final_contrast_level,
+                    is_dark_mode_enabled,
+                    left_margin_width_percent,
+                    right_margin_width_percent,
+                    top_margin_height_percent,
+                    bottom_margin_height_percent,
+                    list_of_cropped_page_widths,
+                    set_of_potential_blank_pages,
+                    list_of_original_document_page_numbers,
+                    is_image_mode_on,
+                    list_of_page_color_filter_thresholds, 
+                    list_of_full_page_filter_thresholds,
+                    image_mode_multiplier
+                  ):
+
+    #The "get_page_color_filter_threshold()" function will extract the image from the 
+    #current page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+    #array to calculate the initial mean grayscale pixel value for the page at the 
+    #given value of "page_index" in the "doc" PDF document, as well as the standard 
+    #deviation for the grayscale values distribution. Then, if the optional argument 
+    #"is_appending_values_to_list" was set to "True" when calling the function, the 
+    #page color filter threshold calculated from the mean grayscale value will be 
+    #appended to the list "list_of_page_color_filter_thresholds" and nothing will 
+    #be returned. Otherwise, the variables required to process the image will be 
+    #returned. 
+    (list_of_page_color_filter_thresholds, 
+    page_color_filter_threshold, 
+    initial_mean_pixel_value, 
+    initial_pixel_value_standard_deviation, 
+    img_array, 
+    img_array_cropping,  
+    height, 
+    width,
+    slice_center_of_page,
+    center_of_page,
+    number_of_non_white_pixels_in_center_of_page) = (
+        get_page_color_filter_threshold( 
+            doc, 
+            page_index, 
+            dpi_setting,
+            left_margin_width_percent,
+            right_margin_width_percent,
+            top_margin_height_percent,
+            bottom_margin_height_percent,
+            number_of_standard_deviations_for_filtering_page_color,
+            is_image_mode_on,
+            list_of_page_color_filter_thresholds))
+
+    #The "get_full_page_filter_threshold()" function either returns only 
+    #"img_array", "img_array_cropping", "initial_mean_pixel_value" if the value 
+    #of "number_of_non_white_pixels_in_center_of_page" is inferior to 30. As this 
+    #value is calculated after the page color filter step in the the 
+    #"get_full_page_filter_threshold()" function, there is no way of 
+    #knowing in advance whether or not the function will also return
+    #"mean_non_white_pixel_value" and "standard_deviation_non_white_pixel_value",
+    #which only happens when the value of "number_of_non_white_pixels_in_center_of_page"
+    #is over 30 and the value of "do_filter_out_splotches_entire_page" is set to "True". 
+    #Therefore, some "try/except" statements are used to handle this situation, and 
+    #the values of "mean_non_white_pixel_value" and "standard_deviation_non_white_pixel_value"
+    #are both initialized to "None".
+    mean_non_white_pixel_value = None
+    standard_deviation_non_white_pixel_value = None
+
+    #If the "do_filter_out_splotches_entire_page" mode isn't enabled (full page filter after 
+    #the page color filter), or there are less than 30 non-white pixels at the center of the page, 
+    #then only the image array, the cropping image array, and the initial mean pixel value will be 
+    #returned, as no full-page filtering (apart from the page color) will take place.
+    try:       
+        #The "get_full_page_filter_threshold()" function will calculate the 
+        #full-page filter threshold, which will be appended to the list 
+        #"list_of_full_page_filter_thresholds" and nothing will be returned 
+        #if the optional argument "is_appending_values_to_list" was set to 
+        #"True" when calling the function. Otherwise, the variables required 
+        #to process the image will be returned.
+        (img_array, 
+        img_array_cropping, 
+        initial_mean_pixel_value) = (get_full_page_filter_threshold(
+                                img_array,
+                                img_array_cropping,
+                                brightness_level,
+                                image_mode_multiplier,
+                                do_filter_out_splotches_margins,
+                                number_of_standard_deviations_for_filtering_page_color_cropping,
+                                number_of_standard_deviations_for_filtering_page_color,
+                                number_of_standard_deviations_for_filtering_splotches_margins,
+                                do_filter_out_splotches_entire_page,
+                                number_of_standard_deviations_for_filtering_splotches_entire_page,
+                                contrast_level,
+                                left_margin_width_percent,
+                                right_margin_width_percent,
+                                top_margin_height_percent,
+                                bottom_margin_height_percent,
+                                height,
+                                width,
+                                slice_center_of_page,
+                                center_of_page,
+                                is_image_mode_on,
+                                page_color_filter_threshold,                                
+                                list_of_page_color_filter_thresholds,
+                                list_of_full_page_filter_thresholds,
+                                initial_mean_pixel_value,
+                                initial_pixel_value_standard_deviation))
+    except:
+        #The "get_full_page_filter_threshold()" function will calculate the 
+        #full-page filter threshold, which will be appended to the list 
+        #"list_of_full_page_filter_thresholds" and nothing will be returned 
+        #if the optional argument "is_appending_values_to_list" was set to 
+        #"True" when calling the function. Otherwise, the variables required 
+        #to process the image will be returned.
+        (img_array, 
+        img_array_cropping, 
+        initial_mean_pixel_value,
+        mean_non_white_pixel_value,
+        standard_deviation_non_white_pixel_value,
+        list_of_full_page_filter_thresholds,
+        full_page_filter_threshold) = (get_full_page_filter_threshold(
+                                    img_array,
+                                    img_array_cropping,
+                                    brightness_level,
+                                    image_mode_multiplier,
+                                    do_filter_out_splotches_margins,
+                                    number_of_standard_deviations_for_filtering_page_color_cropping,
+                                    number_of_standard_deviations_for_filtering_page_color,
+                                    number_of_standard_deviations_for_filtering_splotches_margins,
+                                    do_filter_out_splotches_entire_page,
+                                    number_of_standard_deviations_for_filtering_splotches_entire_page,
+                                    contrast_level,
+                                    left_margin_width_percent,
+                                    right_margin_width_percent,
+                                    top_margin_height_percent,
+                                    bottom_margin_height_percent,
+                                    height,
+                                    width,
+                                    slice_center_of_page,
+                                    center_of_page,
+                                    is_image_mode_on,
+                                    page_color_filter_threshold,                                
+                                    list_of_page_color_filter_thresholds,
+                                    list_of_full_page_filter_thresholds,
+                                    initial_mean_pixel_value,
+                                    initial_pixel_value_standard_deviation))
+
+    #The potentially blank page index (+1 as it is zero-indexed)
+    #is added to the set "set_of_potential_blank_pages", as the
+    #total count of non-white pixels in the center of the page is
+    #inferior to 30 (cutoff point for a blank page).
+
+    #A threshold of 30 non-white pixels in the center of the page is used to meet the minimal
+    #sample size for a normal distribution and obtain a reliable mean and standard deviation
+    #of a non-blank page.
+    if (number_of_non_white_pixels_in_center_of_page < 30):    
+        set_of_potential_blank_pages.add(page_index + 1)
+    #If the "do_filter_out_splotches" mode is enabled (for the margins or "full-page" filters) and 
+    #there are at least 30 non-white pixels at the center of the page, then the "if" statement below 
+    #will filter out the lighter gray pixels.
+    elif (do_filter_out_splotches_margins or do_filter_out_splotches_entire_page or contrast_level != 1):
+
+        #If the filter is applied to all of the page for the pixels
+        #that are lighter than the threshold, the "elif" statement
+        #below will run.
+        if do_filter_out_splotches_entire_page and mean_non_white_pixel_value and standard_deviation_non_white_pixel_value:
+            #Pixels in the page ("img_array") that are lighter than the
+            #threshold calculated from the mean grayscale value of the 
+            #non-white pixels in the center of the page, plus 
+            #"number_of_standard_deviations_for_filtering_splotches_entire_page"
+            #times the standard deviation of these pixels.
+            full_page_filter_threshold = (mean_non_white_pixel_value + 
+                    number_of_standard_deviations_for_filtering_splotches_entire_page * standard_deviation_non_white_pixel_value)
+
+            #The list "list_of_full_page_filter_thresholds" will hold the full-page filter threshold
+            #values calculated for each page, calculated from each page's mean grayscale pixel value
+            #for non-white pixels in the center of the page and and corresponding standard deviation. 
+            #In cases where images were included, these would be significantly darker than the pages 
+            #without images, and therefore the thresholds for these pages would need to be capped to 
+            #avoid filtering out too many pixels. If the calculated threshold for the full-page filter 
+            #for that given page is lower (darker) than the value of the mean of all corresponding 
+            #threshold values for all pages, plus "image_mode_multiplier" times the standard deviation 
+            #of all threshold values for all pages, then the threshold will be set to the latter value.
+            #This only happens if the image mode is on ("is_image_mode_on == True").
+            if is_image_mode_on: 
+                full_page_filter_threshold_cap = (get_list_average_value(list_of_full_page_filter_thresholds) + 
+                image_mode_multiplier * get_list_standard_deviation_value(list_of_full_page_filter_thresholds))
+
+                if full_page_filter_threshold < full_page_filter_threshold_cap:
+                    full_page_filter_threshold = full_page_filter_threshold_cap
+
+            img_array[img_array > full_page_filter_threshold] = 1
 
         #Any pixels that are almost white (0.95/1 or 242/255)
         #will be changed to white to avoid darkening them 
@@ -308,69 +768,75 @@ def process_image(  doc,
         #be used when filtering out the remaining blotches on the outer edges of 
         #the page (if "do_filter_out_splotches_margins == True").
         non_white_pixels_in_center_of_page = center_of_page[center_of_page != 1]
-        mean_non_white_pixel_value_final_brightness_adjustment = np.mean(non_white_pixels_in_center_of_page)
-        standard_deviation_non_white_pixel_value_final_brightness_adjustment = np.std(non_white_pixels_in_center_of_page)
 
-        #The interior of the letters will be selectively darkened by multiplying their grayscale pixel value by a value between
-        #zero and one, where darker pixels (those farther to the left of the mean in the bell curve) will be darkened more so
-        #than pixels closer to the mean or to the right of the mean, so as to avoid darkening the anti-aliasing pixels. 
-        #The modifier "final_brightness_percentage_adjustment" may be used to fine-tune this final brightness adjustment.
+        #If the slice "non_white_pixels_in_center_of_page" isn't empty (its size isn't zero, 
+        #where a size of zero would mean that all pixels at the center of the page are white)
+        #then the pixels within the letters will be selectively darkened in the "if" statement below.
+        if non_white_pixels_in_center_of_page.size != 0:
 
-        #Each category (except the first one) is comprised of two boundaries, where the pixels need to be smaller than the 
-        #right bound and greater or equal to the left bound (e.g., "img_array[greater_or_equal_to_minus_50 & lesser_than_minus_25]").
-        #Each of the bounds are represented below as a percentage of the standard deviation (e.g. "lesser_than_minus_50" means smaller
-        #than minus 50% of the standard deviation to the left of the mean ("mean - 0.5 * standard deviation")).
-        lesser_than_minus_50 = img_array < mean_non_white_pixel_value_final_brightness_adjustment - 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            mean_non_white_pixel_value_final_brightness_adjustment = np.mean(non_white_pixels_in_center_of_page)
+            standard_deviation_non_white_pixel_value_final_brightness_adjustment = np.std(non_white_pixels_in_center_of_page)
 
-        greater_or_equal_to_minus_50 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment - 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            #The interior of the letters will be selectively darkened by multiplying their grayscale pixel value by a value between
+            #zero and one, where darker pixels (those farther to the left of the mean in the bell curve) will be darkened more so
+            #than pixels closer to the mean or to the right of the mean, so as to avoid darkening the anti-aliasing pixels. 
+            #The modifier "final_brightness_percentage_adjustment" may be used to fine-tune this final brightness adjustment.
 
-        lesser_than_minus_25 = img_array < mean_non_white_pixel_value_final_brightness_adjustment - 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            #Each category (except the first one) is comprised of two boundaries, where the pixels need to be smaller than the 
+            #right bound and greater or equal to the left bound (e.g., "img_array[greater_or_equal_to_minus_50 & lesser_than_minus_25]").
+            #Each of the bounds are represented below as a percentage of the standard deviation (e.g. "lesser_than_minus_50" means smaller
+            #than minus 50% of the standard deviation to the left of the mean ("mean - 0.5 * standard deviation")).
+            lesser_than_minus_50 = img_array < mean_non_white_pixel_value_final_brightness_adjustment - 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        greater_or_equal_to_minus_25 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment - 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            greater_or_equal_to_minus_50 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment - 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        lesser_than_0 = img_array < mean_non_white_pixel_value_final_brightness_adjustment
+            lesser_than_minus_25 = img_array < mean_non_white_pixel_value_final_brightness_adjustment - 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        greater_or_equal_to_0 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment
+            greater_or_equal_to_minus_25 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment - 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        lesser_than_plus_25 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            lesser_than_0 = img_array < mean_non_white_pixel_value_final_brightness_adjustment
 
-        greater_or_equal_to_plus_25 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment + 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            greater_or_equal_to_0 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment
 
-        lesser_than_plus_50 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            lesser_than_plus_25 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        greater_or_equal_to_plus_50 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment + 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            greater_or_equal_to_plus_25 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment + 0.25 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        lesser_than_plus_75 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 0.75 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            lesser_than_plus_50 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        greater_or_equal_to_plus_75 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment + 0.75 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            greater_or_equal_to_plus_50 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment + 0.50 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        lesser_than_plus_100 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 1.00 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
+            lesser_than_plus_75 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 0.75 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        #The user would input how many times they want the text to be darker 
-        #(e.g., 2.0 times darker would give 1.0/2.0 = 0.5 as the value of 
-        #"inverse_final_brightness_level", instead of the default value of 1).
-        inverse_final_brightness_level = 1
-        #In the case where "final_brightness_level" is zero,
-        #we want to avoid a "divide by zero" error.
-        if final_brightness_level > 0:
-            inverse_final_brightness_level = 1 / final_brightness_level
+            greater_or_equal_to_plus_75 = img_array >= mean_non_white_pixel_value_final_brightness_adjustment + 0.75 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        img_array[lesser_than_minus_50] = 0.025 * inverse_final_brightness_level
+            lesser_than_plus_100 = img_array < mean_non_white_pixel_value_final_brightness_adjustment + 1.00 * standard_deviation_non_white_pixel_value_final_brightness_adjustment
 
-        img_array[greater_or_equal_to_minus_50 & lesser_than_minus_25] *= 0.05 * inverse_final_brightness_level
+            #The user would input how many times they want the text to be darker 
+            #(e.g., 2.0 times darker would give 1.0/2.0 = 0.5 as the value of 
+            #"inverse_final_brightness_level", instead of the default value of 1).
+            inverse_final_brightness_level = 1
+            #In the case where "final_brightness_level" is zero,
+            #we want to avoid a "divide by zero" error.
+            if final_brightness_level > 0:
+                inverse_final_brightness_level = 1 / final_brightness_level
 
-        img_array[greater_or_equal_to_minus_25 & lesser_than_0] *= 0.10 * inverse_final_brightness_level
+            img_array[lesser_than_minus_50] = 0.025 * inverse_final_brightness_level
 
-        img_array[greater_or_equal_to_0 & lesser_than_plus_25] *= 0.20 * inverse_final_brightness_level
+            img_array[greater_or_equal_to_minus_50 & lesser_than_minus_25] *= 0.05 * inverse_final_brightness_level
 
-        img_array[greater_or_equal_to_plus_25 & lesser_than_plus_50] *= 0.30 * inverse_final_brightness_level
+            img_array[greater_or_equal_to_minus_25 & lesser_than_0] *= 0.10 * inverse_final_brightness_level
 
-        img_array[greater_or_equal_to_plus_50 & lesser_than_plus_75] *= 0.40 * inverse_final_brightness_level
+            img_array[greater_or_equal_to_0 & lesser_than_plus_25] *= 0.20 * inverse_final_brightness_level
 
-        img_array[greater_or_equal_to_plus_75 & lesser_than_plus_100] *= 0.50 * inverse_final_brightness_level
+            img_array[greater_or_equal_to_plus_25 & lesser_than_plus_50] *= 0.30 * inverse_final_brightness_level
 
-        #Clip values to ensure they stay between zero and 1
-        img_array = np.clip(img_array, 0.0, 1.0)
+            img_array[greater_or_equal_to_plus_50 & lesser_than_plus_75] *= 0.40 * inverse_final_brightness_level
+
+            img_array[greater_or_equal_to_plus_75 & lesser_than_plus_100] *= 0.50 * inverse_final_brightness_level
+
+            #Clip values to ensure they stay between zero and 1
+            img_array = np.clip(img_array, 0.0, 1.0)
 
         #The "final_contrast_level" adjusts the contrast once the filters and the final brightness level
         #have been applied. The same "initial_mean_pixel_value" that was used for the first contrast step
@@ -868,10 +1334,13 @@ def process_image(  doc,
     if is_dark_mode_enabled:
         img_array = 1 - img_array
 
-    #Convert the NumPy array back to a grayscale pixmap, after denormalizing from 0.0-1 to 0-255:
+    #To convert the NumPy array back to a grayscale pixmap, it must
+    #first be converted into a bytestream that will be used in creating
+    #the "Pixmap" object, after denormalizing from 0.0-1 to 0-255 by 
+    #multiplying the grayscale values by 255.
     samples_uint8 = (img_array * 255).astype(np.uint8).tobytes()
 
-    #The shape is (height, width, 1), as it is in grayscale
+    #The shape is (height, width, 1), as it is in grayscale.
     #To create a Pixmap from raw data, positional arguments must be provided 
     #(without keywords such as "colorspace", "width" or "height")
     new_pixmap = pymupdf.Pixmap(
@@ -907,7 +1376,7 @@ def process_image(  doc,
 
 #The function "display_progress()" will display the progress string in the console
 #and return the estimated number of seconds for the code to complete.
-def display_progress(page_index, first_page, last_page, start_time, previous_estimated_seconds, list_of_individual_removed_pages):
+def display_progress(page_index, first_page, last_page, start_time, previous_estimated_seconds, list_of_individual_removed_pages, completion_eta_string):
 
     elapsed_seconds = time.perf_counter() - start_time
     #divmod returns (minutes, remaining_seconds)
@@ -921,7 +1390,7 @@ def display_progress(page_index, first_page, last_page, start_time, previous_est
     #by Zero" errors).
     if last_page - first_page == 0:
         percent_completion = 100
-        eta_string = f" ETA: 00:00\n\nGenerating final PDF file (this could take a minute).\n"
+        eta_string = completion_eta_string
     else:
         #The percent completion is calculated by dividing the difference between the current page index
         #and the first page index by the total number of pages to be processed, which is itself
@@ -952,7 +1421,7 @@ def display_progress(page_index, first_page, last_page, start_time, previous_est
         #then the remaining time is zero seconds (" ETA: 00:00").
         if (page_index == last_page):
             percent_completion = 100
-            eta_string = f" ETA: 00:00\n\nGenerating final PDF file (this could take a minute).\n"
+            eta_string = completion_eta_string
         #If the current "page_index" is the last remaining page to be processed and all the remining pages after it have been removed 
         #("[index for index in range(page_index, last_page + 1) if index + 1 not in list_of_individual_removed_pages] == [page_index]"),
         #with +1 being added because "page_index" is zero indexed, while the pages in the "list_of_individual_removed_pages" are not 
@@ -960,7 +1429,7 @@ def display_progress(page_index, first_page, last_page, start_time, previous_est
         elif (list_of_individual_removed_pages != [] and 
         [index for index in range(page_index, last_page + 1) if index + 1 not in list_of_individual_removed_pages] == [page_index]):
             percent_completion = 100
-            eta_string = f" ETA: 00:00\n\nGenerating final PDF file (this could take a minute).\n"
+            eta_string = completion_eta_string
         #We do not want to display negative times, hence the
         #condition ("elif (estimated_seconds > 0)").
         elif (estimated_seconds > 0):
@@ -1289,7 +1758,8 @@ def save_pdf(cwd,
     output_pdf_file_number,
     output_folder_name,
     output_file_name,
-    set_of_potential_blank_pages):
+    set_of_potential_blank_pages,
+    current_pdf_file_doc_toc):
 
     #If the user has selected white as their white color
     #cover_page_color == (1.0,), then it means that
@@ -1303,7 +1773,6 @@ def save_pdf(cwd,
         cover_page_black_color = (0,)
     else:
         cover_page_black_color = (0, 0, 0)
-
 
     doc_output_page_heights_list = []
     doc_output_page_widths_list = []
@@ -1420,6 +1889,28 @@ def save_pdf(cwd,
             cover_page_height_points = round(sum(doc_output_page_heights_list)/len(doc_output_page_heights_list))
         if len(doc_output_page_widths_list) > 0:
             cover_page_width_points = round(sum(doc_output_page_widths_list)/len(doc_output_page_widths_list))
+
+    #The variable "current_pdf_file_doc_toc", initialized to an empty list, will contain
+    #the TOC data for the current PDF file as a list of lists, with the page numbers for
+    #the TOC items found in later PDF files set to "-1", indicating that those TOC items
+    #are not found in the current file. The list "current_pdf_file_doc_toc" needs to be
+    #initialized as an empty list in case there is no TOC metadata in the original PDF
+    #file, as "current_pdf_file_doc_toc" is passed in as an argument to the "save_pdf()"
+    #function in order to call the PyMuPDF "Document" class function "set_toc()" on 
+    #"doc_output". 
+    #The "set_toc()" function needs to be called after the padding step (which creates 
+    #a new larger page, pastes the former page's content on the larger page and then 
+    #deletes the former page, which would sever the link to the PDF's TOC entry for 
+    #that page were the "set_toc()" function called before the padding step).
+    if current_pdf_file_doc_toc != []:
+        #The amended TOC data list of lists "current_pdf_file_doc_toc"
+        #is added to the "doc_output" object using the "set_toc()" 
+        #"PyMuPDF" method. This needs to be done before adding the 
+        #cover page in the "save_pdf()" function call  
+        #(if "cover_page_enabled == True") in order 
+        #to avoid skewing the page numbers.    
+        doc_output.set_toc(current_pdf_file_doc_toc)
+
     #The following "if" statement will run if the "Cover Page"
     #mode is enabled, and will generate the cover page itself.
     if cover_page_enabled:
@@ -1645,9 +2136,161 @@ def save_pdf(cwd,
     return set_of_potential_blank_pages, output_pdf_file_number
 
 
+#The function "process_toc()" will return the list of lists "current_pdf_file_doc_toc", containing
+#the TOC information for the PDF file being currently processed, and the list of lists "next_pdf_file_doc_toc" 
+#containing the TOC information for the next PDF file to be generated. These lists will only include
+#the page numbers for the TOC entries present in the respective PDF files (current or next PDF file), 
+#adjusted for the cumulative number of pages already processed, as each PDF file starts at page number one, 
+#and a page number of "-1" for deleted pages that are also TOC entries and for TOC entries for which the 
+#page number is outside the range of the PDF document.
+def process_toc(
+        doc_toc,
+        next_pdf_file_doc_toc, 
+        total_number_of_pages_in_doc, 
+        total_number_of_processed_pages, 
+        doc_output):
+
+    len_doc_toc = len(doc_toc)
+    #The variable "first_toc_entry_page_of_next_pdf_file", initialized to "None",
+    #will store the page number of the first TOC entry found in the next PDF file,
+    #(adjusted for the cumulative number of pages already processed, as each PDF file 
+    #starts at page number one) where the TOC index is at least the first one ("i >=0"), 
+    #the page number for that TOC index isn't "-1" (which would indicate that either that page 
+    #has been deleted or is present in another file) and the TOC entry page is greater than
+    #the last processed page up to date ("doc_toc[i][2] > total_number_of_processed_pages", 
+    #where "doc_toc[i][2]" is used rather than "current_pdf_file_doc_toc[i][2]" because
+    #the original (non-adjusted) TOC entry page number is compared to the cumulative
+    #number of pages (also non-adjusted) that have been processed up to date).
+    first_toc_entry_page_of_next_pdf_file = None
+    #The variable "first_toc_entry_index_of_next_pdf_file", initialized to zero,
+    #will hold the TOC entry index of the first TOC entry of the next PDF file.
+    #It will be used to set the page number ("current_pdf_file_doc_toc[i][2]") 
+    #of all TOC entries already included in previously generated PDF files to 
+    #"-1", indicating that they are not found in the current PDF file. 
+    first_toc_entry_index_of_next_pdf_file = 0
+
+    #The variable "current_pdf_file_doc_toc", initialized to an empty list, will contain
+    #the TOC data for the current PDF file as a list of lists, with the page numbers for
+    #the TOC items found in later PDF files set to "-1", indicating that those TOC items
+    #are not found in the current file. The list "current_pdf_file_doc_toc" needs to be
+    #initialized as an empty list in case there is no TOC metadata in the original PDF
+    #file, as "current_pdf_file_doc_toc" is passed in as an argument to the "save_pdf()"
+    #function in order to call the PyMuPDF "Document" class function "set_toc()" on 
+    #"doc_output". 
+    #The "set_toc()" function needs to be called after the padding step (which creates 
+    #a new larger page, pastes the former page's content on the larger page and then 
+    #deletes the former page, which would sever the link to the PDF's TOC entry for 
+    #that page were the "set_toc()" function called before the padding step).
+
+    #The value of "current_pdf_file_doc_toc" is updated to a deep copy of "next_pdf_file_doc_toc",
+    #where a deep copy is required for these objects to occupy different addresses in memory, as 
+    #these are nested lists. At this point, "next_pdf_file_doc_toc" already had the pages of the
+    #TOC items already found in previously generated PDF files set to "-1". The "if" statement
+    #below ("total_number_of_pages_in_doc > total_number_of_processed_pages") will set the pages
+    #of the TOC items found in PDF files after the current one set to "-1". This means that only 
+    #the TOC items found in the current PDF file will have their page numbers set to page numbers 
+    #that aren't "-1".
+    current_pdf_file_doc_toc = copy.deepcopy(next_pdf_file_doc_toc)
+
+    #The total number of pages outputted in the PDF files will be updated
+    #after finishing the processing of each "doc_output" object, each of
+    #which is used to create a PDF output file. This will allow to determine
+    #which TOC entries belong to the current "doc_output" object, and which
+    #have already been dealt with in previous PDF files. That is to say,
+    #if the total number of pages in the "Document" object "doc"
+    #("total_number_of_pages_in_doc") is greater than the total
+    #number of already processed pages up to date 
+    #("total_number_of_processed_pages"), then the 
+    #"if" statement below will run.
+    if total_number_of_pages_in_doc > total_number_of_processed_pages:
+        #The "for" loop below will loop over all TOC entries in reverse order to find the 
+        #first one after the last processed page that doesn't have a "-1" page number. 
+        for i in range(len_doc_toc - 1, -1, -1):
+            #The variable "first_toc_entry_page_of_next_pdf_file", initialized to "None",
+            #will store the page number of the first TOC entry found in the next PDF file,
+            #(adjusted for the cumulative number of pages already processed, as each PDF file 
+            #starts at page number one) where the TOC index is at least the first one ("i >=0"), 
+            #the page number for that TOC index isn't "-1" (which would indicate that either that page 
+            #has been deleted or is present in another file) and the TOC entry page is greater than
+            #the last processed page up to date ("doc_toc[i][2] > total_number_of_processed_pages", 
+            #where "doc_toc[i][2]" is used rather than "current_pdf_file_doc_toc[i][2]" because
+            #the original (non-adjusted) TOC entry page number is compared to the cumulative
+            #number of pages (also non-adjusted) that have been processed up to date).
+            if i >= 0 and doc_toc[i][2] > total_number_of_processed_pages and current_pdf_file_doc_toc[i][2] != -1:
+                first_toc_entry_page_of_next_pdf_file = current_pdf_file_doc_toc[i][2] - total_number_of_processed_pages
+                #The variable "first_toc_entry_index_of_next_pdf_file", initialized to zero,
+                #will hold the TOC entry index of the first TOC entry of the next PDF file.
+                #It will be used to set the page number ("current_pdf_file_doc_toc[i][2]") 
+                #of all TOC entries already included in previously generated PDF files to 
+                #"-1", indicating that they are not found in the current PDF file. 
+                first_toc_entry_index_of_next_pdf_file = i
+                #Any TOC page entries in "current_pdf_file_doc_toc" after the last TOC entry 
+                #of the current "doc_output" (so "i", onwards) will be set to "-1", as they 
+                #will be in the next PDF document(s).
+                for j in range(i, len_doc_toc):
+                    current_pdf_file_doc_toc[j][2] = -1
+            #If the page number of the current TOC item at index "i" is 
+            #smaller or equal to the total number of processed pages,
+            #then it means that the first TOC entry of the next PDF
+            #document was either already found or that there are no
+            #remaining TOC entries in the next PDF documents, so the
+            #"for i in range(len_doc_toc - 1, -1, -1)" loop can be
+            #broken out of. "doc_toc[i][2]" is used rather than
+            #"current_pdf_file_doc_toc[i][2]" because the
+            #original (non-adjusted) TOC entry page number 
+	        #is compared to the cumulative number of pages 
+            #(also non-adjusted) that have been processed 
+            #up to date)
+            elif doc_toc[i][2] <= total_number_of_processed_pages:
+                break
+
+    #After storing the TOC for the current PDF output file in the 
+    #"current_pdf_file_doc_toc" variable, we need to reset the value 
+    #of "next_pdf_file_doc_toc" to that of the original "doc_toc" 
+    #nested list in order to recover all of the TOC page information 
+    #(after correcting for any removed pages), before setting the page 
+    #numbers of already processed TOC entries to "-1" for the next PDF 
+    #file. The "copy.deepcopy()" method needs to be used to ensure that 
+    #the two variables do not occupy the same memory address, as "doc_toc" 
+    #is a nested list.
+    next_pdf_file_doc_toc = copy.deepcopy(doc_toc)
+
+    #If the value of "first_toc_entry_page_of_next_pdf_file"
+    #is still "None", then it means that all TOC entries are
+    #present in the pages already processed and none will be 
+    #present in the next PDF file, so all TOC entry pages of
+    #"next_pdf_file_doc_toc" can be set to "-1". A page number
+    #of "-1" indicates that these pages are either absent 
+    #(removed pages) or present in previous PDF documents.
+    if not first_toc_entry_page_of_next_pdf_file:
+        for i in range(len_doc_toc):
+            next_pdf_file_doc_toc[i][2] = -1
+    #Otherwise, all TOC entry page numbers for TOC indices
+    #prior to the "first_toc_entry_index_of_next_pdf_file"
+    #will be set to "-1", as these TOC pages are present
+    #in previously processed PDF files.
+    else:
+        for i in range(len_doc_toc):
+            #The variable "first_toc_entry_index_of_next_pdf_file", initialized to zero,
+            #will hold the TOC entry index of the first TOC entry of the next PDF file.
+            #It will be used to set the page number ("current_pdf_file_doc_toc[i][2]") 
+            #of all TOC entries already included in previously generated PDF files to 
+            #"-1", indicating that they are not found in the current PDF file. 
+            if i < first_toc_entry_index_of_next_pdf_file:
+                next_pdf_file_doc_toc[i][2] = -1
+            #If the value of i is greater or equal to the value of "first_toc_entry_index_of_next_pdf_file",
+            #then it means that these TOC entries will be found in the next PDF file(s), and their page numbers
+            #will be adjusted for the cumulative number of pages already processed, as each PDF file starts at
+            #page number one.
+            else:
+                next_pdf_file_doc_toc[i][2] -= total_number_of_processed_pages
+
+    return current_pdf_file_doc_toc, next_pdf_file_doc_toc, doc_output
+
 
 #The function "generate_pdf_file()" will generate the PDF file.
-def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary, cwd):
+def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary, cwd, 
+    only_rasterize_pdf_and_remove_pages = False):
 
     first_page = int(json_settings_dictionary["First Page"])
     #If the value of "first_page" is valid, then it will be zero-indexed by subtracting one from it.
@@ -1849,6 +2492,12 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
     if not isinstance(do_filter_out_splotches_entire_page, bool):
         do_filter_out_splotches_entire_page = json_default_settings_dictionary["Full-Page Filter"]
 
+    is_image_mode_on = json_settings_dictionary["Image Mode"]
+    #If the value of "is_image_mode_on" isn't a Boolean, then it will
+    #be set to its default value of "False".
+    if not isinstance(is_image_mode_on, bool):
+        is_image_mode_on = json_default_settings_dictionary["Image Mode"]
+
     number_of_standard_deviations_for_filtering_page_color_cropping = json_settings_dictionary["Page Color Filter Multiplier When Cropping"]
     #If the value isn't a valid integer or float, then the default value will be used instead.
     if not is_valid_int_or_float(number_of_standard_deviations_for_filtering_page_color_cropping):
@@ -1869,9 +2518,33 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
     if not is_valid_int_or_float(number_of_standard_deviations_for_filtering_splotches_entire_page):
         number_of_standard_deviations_for_filtering_splotches_entire_page = json_default_settings_dictionary["Full-Page Filter Multiplier"]
 
+    image_mode_multiplier = json_settings_dictionary["Image Mode Multiplier"]
+    #If the value isn't a valid integer or float, then the default value will be used instead.
+    if not is_valid_int_or_float(image_mode_multiplier):
+        image_mode_multiplier = json_default_settings_dictionary["Image Mode Multiplier"]    
+
+
     pdf_path = os.path.join(cwd, "Original Book PDF File", "*.pdf")
     output_folder_name = "Final Book PDF Files"
     pdf_files = glob.glob(pdf_path)
+
+    if pdf_files == []:
+        #The function "get_terminal_dimensions()" will return the number of columns 
+        #and rows in the console, to allow to properly format the text and dividers.
+        columns, lines = get_terminal_dimensions()
+
+        #If either the "Original Book PDF File" subfolder is missing, or if it is empty,
+        #it will be created and the code will exit the application while printing the 
+        #"missing_pdf_string" on-screen.
+        missing_pdf_string = "\n" + textwrap.fill("Please add a PDF file in the 'Original Book PDF File' subfolder of the Analog eBooks folder and launch the application again.", width=columns) + "\n"     
+        if not os.path.exists(os.path.join(cwd, "Original Book PDF File")):
+            os.mkdir(os.path.join(cwd, "Original Book PDF File"))
+            sys.exit(missing_pdf_string)
+        else:
+            pdf_path = os.path.join(cwd, "Original Book PDF File", "*.pdf")
+            pdf_files = glob.glob(pdf_path)
+            if pdf_files == []:
+                sys.exit(missing_pdf_string)
 
     for pdf_file_index in range(len(pdf_files)):
 
@@ -1892,6 +2565,92 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
         #The "doc" PyMuPDF "Document" object will hold the original PDF document's
         #data at the index "pdf_file_index" of the "pdf_files" list of PDF file paths. 
         doc = pymupdf.open(pdf_files[pdf_file_index])
+
+        #If a TOC were present in the "Document" object "doc", then the value of "doc_toc"
+        #wouldn't be an empty list. It would be a list of lists with the following structure:
+        #"[[lvl_0, title_0, page_0], [[lvl_1, title_1, page_1], ...]", where "lvl" represents
+        #the hierarchy level of the item, "title" is the title to be displayed for that item
+        #in the TOC and "page" is the target page number (1-based).
+        doc_toc = doc.get_toc()
+
+        #The variable "current_pdf_file_doc_toc", initialized to an empty list, will contain
+        #the TOC data for the current PDF file as a list of lists, with the page numbers for
+        #the TOC items found in later PDF files set to "-1", indicating that those TOC items
+        #are not found in the current file. The list "current_pdf_file_doc_toc" needs to be
+        #initialized as an empty list in case there is no TOC metadata in the original PDF
+        #file, as "current_pdf_file_doc_toc" is passed in as an argument to the "save_pdf()"
+        #function in order to call the PyMuPDF "Document" class function "set_toc()" on 
+        #"doc_output". 
+        #The "set_toc()" function needs to be called after the padding step (which creates 
+        #a new larger page, pastes the former page's content on the larger page and then 
+        #deletes the former page, which would sever the link to the PDF's TOC entry for 
+        #that page were the "set_toc()" function called before the padding step).
+        current_pdf_file_doc_toc = []
+
+        #If the nested list of TOC data "doc_toc" isn't empty, then it means that the
+        #original PDF document had TOC metadata that needs to be processed to adjust
+        #the page numbers of the TOC items, should there be any removed page numbers
+        #in the "list_of_individual_removed_pages" list. This will be done in the
+        #"if" statement below.
+        if doc_toc != [] and list_of_individual_removed_pages != []:
+            len_doc_toc = len(doc_toc)
+            #The original removed page numbers will be cycled over in reversed order
+            #so as to avoid indexing issues when comparing the amended TOC entry page
+            #numbers with the original removed page numbers.
+            for i in range(len(list_of_individual_removed_pages)-1, -1, -1):
+                #The "for" loop below will cycle over all TOC sublists within "doc_toc"
+                #("[[lvl_0, title_0, page_0], [[lvl_1, title_1, page_1], ...]", where "lvl" represents
+                #the hierarchy level of the item, "title" is the title to be displayed for that item
+                #in the TOC and "page" is the target page number (1-based)).
+                for j in range(len_doc_toc):
+                    #If the page number of the current TOC item is equal to one of the
+                    #removed pages, then that TOC item will be assigned the page number 
+                    #"-1", indicating that either the page number is absent, or present
+                    #in another file.
+                    if doc_toc[j][2] == list_of_individual_removed_pages[i]:
+                        doc_toc[j][2] = -1
+                        #If the current TOC item isn't the last one, 
+                        #the page number of each subsequent TOC item
+                        #will be decremented by one page to account
+                        #for the fact that a page was removed.
+                        if j < len_doc_toc - 1:
+                            for k in range(j + 1, len_doc_toc):
+                                #The "if doc_toc[k][2] > 1" condition
+                                #ensures that TOC entries that are not present
+                                #in the current PDF file (already set to "-1")
+                                #and the TOC entry at page number one aren't 
+                                #further decremented
+                                if doc_toc[k][2] > 1: 
+                                    doc_toc[k][2] -= 1
+                            #The "for j in range(len_doc_toc)" loop is
+                            #broken out of, in order to avoid decrementing
+                            #more TOC entry page numbers in the "elif" statement
+                            #below, as we have already cycled through all of the
+                            #TOC entry items after the one at the index "j" in the
+                            #"for k in range(j + 1, len_doc_toc)" loop above.
+                            break
+                    #If the page number of the current TOC item at the index "j" is greater than the
+                    #removed page number at the index "i", then it means that a page was removed before it,
+                    #and its page number and that of every TOC item after it will be decremented by one page.
+                    elif doc_toc[j][2] > list_of_individual_removed_pages[i]:
+                            for k in range(j, len_doc_toc):
+                                #The "if doc_toc[k][2] > 1" condition
+                                #ensures that TOC entries that are not present
+                                #in the current PDF file (already set to "-1")
+                                #and the TOC entry at page number one aren't 
+                                #further decremented
+                                if doc_toc[k][2] > 1:
+                                    doc_toc[k][2] -= 1
+                            break
+
+        #The value of "next_pdf_file_doc_toc" is updated with
+        #the value of "doc_toc", after all of the adjustments
+        #were made for the removed pages. The "copy.deepcopy()"
+        #method needs to be used to ensure that the two variables
+        #do not occupy the same memory address, as "doc_toc" is
+        #a nested list.
+        next_pdf_file_doc_toc = copy.deepcopy(doc_toc)
+
         #Just to make sure that the first page is positive.
         if first_page < 0:
             first_page = 0
@@ -2072,13 +2831,21 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
 
         print(color_mode_string)
 
-        print(f"- Auto-Cropping: {return_on_for_true_and_off_for_false(json_settings_dictionary["Auto-Cropping"])}")
+        #If the user has selected the "a" option from the main menu 
+        #("Generate rasterized PDF (No Crop nor Filter Modifications)"),
+        #in which case the Boolean variable "only_rasterize_pdf_and_remove_pages" 
+        #would be set to "True", then the settings summary will indicate that the
+        #"Auto-Cropping" and "Auto-Padding" modes are turned off and that the code
+        #will only output a rasterized PDF file.
+        if only_rasterize_pdf_and_remove_pages:
+            print("- Generate rasterized PDF (No Crop nor Filter Modifications)")
+        else:
+            print(f"- Auto-Cropping: {return_on_for_true_and_off_for_false(json_settings_dictionary["Auto-Cropping"])}")
 
-        print(f"- Auto-Padding: {return_on_for_true_and_off_for_false(json_settings_dictionary["Auto-Padding"])}")
+            print(f"- Auto-Padding: {return_on_for_true_and_off_for_false(json_settings_dictionary["Auto-Padding"])}")
 
         print("\n")
 
-        start_time = time.perf_counter()
         #The previous estimation of the remaining number of seconds is stored in the variable
         #"previoous_estimated_seconds" and will be used instead of the current calculation
         #if it exceeds the previous estimation, so as to avoid the ETA timer increasing 
@@ -2099,6 +2866,201 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
         #blank pages.
         list_of_original_document_page_numbers = []
 
+        #The variable "total_number_of_pages_in_doc" holds the adjusted total number of 
+        #pages found in the "Document" object "doc", excluding the added cover page if 
+        #"cover_page_enabled == True"), after removing all of pages from the list
+        #"list_of_individual_removed_pages". It will be used when determining whether
+        #or not there are further TOC entries left in the next PDF files.
+        total_number_of_pages_in_doc = len(doc) - len(list_of_individual_removed_pages)
+
+        #The total number of pages outputted in the PDF files will be updated
+        #after finishing the processing of each "doc_output" object, each of
+        #which is used to create a PDF output file. This will allow to determine
+        #which TOC entries belong to the current "doc_output" object, and which
+        #have already been dealt with in previous PDF files.
+        total_number_of_processed_pages = 0
+
+        #The list "list_of_page_color_filter_thresholds" will hold the page color filter threshold
+        #values calculated for each page, calculated from each page's mean grayscale pixel value and 
+        #and corresponding standard deviation. In cases where images were included, these would be 
+        #significantly darker than the pages without images, and therefore the thresholds for these 
+        #pages would need to be capped to avoid filtering out too many pixels. If the calculated 
+        #threshold for the page color filter or the full page filter for that given page is lower 
+        #(darker) than the value of the mean of all corresponding threshold values for all pages,  
+        #plus "image_mode_multiplier" times the standard deviation of all threshold values for 
+        #all pages, then the threshold will be set to the latter value.
+        list_of_page_color_filter_thresholds = []
+        page_color_filter_threshold = None
+        img_array = None
+        img_array_cropping = None
+        height = None
+        width = None
+
+        #The list "list_of_full_page_filter_thresholds" will hold the full-page filter threshold
+        #values calculated for each page, calculated from each page's mean grayscale pixel value and 
+        #and corresponding standard deviation. In cases where images were included, these would be 
+        #significantly darker than the pages without images, and therefore the thresholds for these 
+        #pages would need to be capped to avoid filtering out too many pixels. If the calculated 
+        #threshold for the page color filter or the full page filter for that given page is lower 
+        #(darker) than the value of the mean of all corresponding threshold values for all pages,  
+        #plus "image_mode_multiplier" times the standard deviation of all threshold values for 
+        #all pages, then the threshold will be set to the latter value.
+        list_of_full_page_filter_thresholds = []
+
+        if is_image_mode_on:
+            start_time = time.perf_counter()
+            print("\nThe first step of the image mode is now running:")
+
+            #A first "for" loop looping through all of the non-removed pages in the original PDF
+            #document appends each threshold for the page color filter for each page to the list
+            #"list_of_page_color_filter_thresholds". This list will be important should the 
+            #"image mode" be turned on, as it will prevent pages with images on it from being
+            #excessively filtered, as these are normally darker than text-only pages as a rule.
+
+            #As "last_page" is zero-indexed, +1 needs to be added,
+            #in order to include it in the range.
+            for page_index in range(first_page, last_page + 1):
+
+                #As "page_index" is zero-indexed, +1 needs to be added to it when comparing
+                #with the first value of "list_of_individual_removed_pages"
+                if list_of_individual_removed_pages == [] or (list_of_individual_removed_pages != [] and page_index + 1 != list_of_individual_removed_pages[0]): 
+
+                    #The "get_page_color_filter_threshold()" function will extract the image from the 
+                    #current page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+                    #array to calculate the initial mean grayscale pixel value for the page at the 
+                    #given value of "page_index" in the "doc" PDF document, as well as the standard 
+                    #deviation for the grayscale values distribution. Then, if the optional argument 
+                    #"is_appending_values_to_list" was set to "True" when calling the function, the 
+                    #page color filter threshold calculated from the mean grayscale value will be 
+                    #appended to the list "list_of_page_color_filter_thresholds" and nothing will 
+                    #be returned. Otherwise, the variables required to process the image will be 
+                    #returned.
+                    get_page_color_filter_threshold( 
+                        doc, 
+                        page_index, 
+                        dpi_setting,
+                        left_margin_width_percent,
+                        right_margin_width_percent,
+                        top_margin_height_percent,
+                        bottom_margin_height_percent,
+                        number_of_standard_deviations_for_filtering_page_color,
+                        is_image_mode_on,
+                        list_of_page_color_filter_thresholds,                    
+                        True)
+
+                #The function "display_progress" will display the progress string in the console
+                #and return the estimated number of seconds for the code to complete.
+
+                #The previous estimation of the remaining number of seconds is stored in the variable
+                #"previoous_estimated_seconds" and will be used instead of the current calculation
+                #if it exceeds the previous estimation, so as to avoid the ETA timer increasing 
+                #its estimation.
+                previous_estimated_seconds = display_progress(page_index, first_page, last_page,
+                    start_time, previous_estimated_seconds, list_of_individual_removed_pages,
+                    " ETA: 00:00\n\n")
+
+            start_time = time.perf_counter()
+            print("\nThe second step of the image mode is now running:")
+
+            #Once the list "list_of_page_color_filter_thresholds" has been populated, a 
+            #second "for" loop looping through all of the non-removed pages in the original 
+            #PDF document will call the "get_page_color_filter_threshold()" function once again,
+            #this time without passing in the "True" value for the "is_appending_values_to_list"
+            #optional argument, which will then cause it to return all of the variables required 
+            #to process the page image array in the function "get_full_page_filter_threshold()", 
+            #which itself appends each threshold for the full-page filter for each page to the list
+            #"list_of_full_page_filter_thresholds". This list will also be important should the 
+            #"image mode" be turned on, as it will prevent pages with images on it from being
+            #excessively filtered, as these are normally darker than text-only pages as a rule.
+
+            #As "last_page" is zero-indexed, +1 needs to be added,
+            #in order to include it in the range.
+            for page_index in range(first_page, last_page + 1):
+
+                #As "page_index" is zero-indexed, +1 needs to be added to it when comparing
+                #with the first value of "list_of_individual_removed_pages"
+                if list_of_individual_removed_pages == [] or (list_of_individual_removed_pages != [] and page_index + 1 != list_of_individual_removed_pages[0]): 
+
+                    #The "get_page_color_filter_threshold()" function will extract the image from the 
+                    #current page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+                    #array to calculate the initial mean grayscale pixel value for the page at the 
+                    #given value of "page_index" in the "doc" PDF document, as well as the standard 
+                    #deviation for the grayscale values distribution. Then, if the optional argument 
+                    #"is_appending_values_to_list" was set to "True" when calling the function, the 
+                    #page color filter threshold calculated from the mean grayscale value will be 
+                    #appended to the list "list_of_page_color_filter_thresholds" and nothing will 
+                    #be returned. Otherwise, the variables required to process the image will be 
+                    #returned.               
+                    (list_of_page_color_filter_thresholds, 
+                    page_color_filter_threshold, 
+                    initial_mean_pixel_value, 
+                    initial_pixel_value_standard_deviation, 
+                    img_array, 
+                    img_array_cropping,  
+                    height, 
+                    width,
+                    slice_center_of_page,
+                    center_of_page,
+                    number_of_non_white_pixels_in_center_of_page) = (
+                        get_page_color_filter_threshold( 
+                        doc, 
+                        page_index, 
+                        dpi_setting,
+                        left_margin_width_percent,
+                        right_margin_width_percent,
+                        top_margin_height_percent,
+                        bottom_margin_height_percent,
+                        number_of_standard_deviations_for_filtering_page_color,
+                        is_image_mode_on,
+                        list_of_page_color_filter_thresholds))
+
+                    #The "get_full_page_filter_threshold()" function will calculate the 
+                    #full-page filter threshold, which will be appended to the list 
+                    #"list_of_full_page_filter_thresholds" and nothing will be returned 
+                    #if the optional argument "is_appending_values_to_list" was set to 
+                    #"True" when calling the function. Otherwise, the variables required 
+                    #to process the image will be returned.
+                    get_full_page_filter_threshold(
+                        img_array,
+                        img_array_cropping,
+                        brightness_level,
+                        image_mode_multiplier,
+                        do_filter_out_splotches_margins,
+                        number_of_standard_deviations_for_filtering_page_color_cropping,
+                        number_of_standard_deviations_for_filtering_page_color,
+                        number_of_standard_deviations_for_filtering_splotches_margins,
+                        do_filter_out_splotches_entire_page,
+                        number_of_standard_deviations_for_filtering_splotches_entire_page,
+                        contrast_level,
+                        left_margin_width_percent,
+                        right_margin_width_percent,
+                        top_margin_height_percent,
+                        bottom_margin_height_percent,
+                        height,
+                        width,
+                        slice_center_of_page,
+                        center_of_page,
+                        is_image_mode_on,
+                        page_color_filter_threshold,
+                        list_of_page_color_filter_thresholds,
+                        list_of_full_page_filter_thresholds,
+                        initial_mean_pixel_value,
+                        initial_pixel_value_standard_deviation,
+                        True)
+
+                #The function "display_progress" will display the progress string in the console
+                #and return the estimated number of seconds for the code to complete.
+
+                #The previous estimation of the remaining number of seconds is stored in the variable
+                #"previoous_estimated_seconds" and will be used instead of the current calculation
+                #if it exceeds the previous estimation, so as to avoid the ETA timer increasing 
+                #its estimation.
+                previous_estimated_seconds = display_progress(page_index, first_page, last_page,
+                    start_time, previous_estimated_seconds, list_of_individual_removed_pages,
+                    " ETA: 00:00\n\n")
+
+        start_time = time.perf_counter()
+
         #As "last_page" is zero-indexed, +1 needs to be added,
         #in order to include it in the range.
         for page_index in range(first_page, last_page + 1):
@@ -2107,7 +3069,36 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
             #with the first value of "list_of_individual_removed_pages"
             if list_of_individual_removed_pages == [] or (list_of_individual_removed_pages != [] and page_index + 1 != list_of_individual_removed_pages[0]): 
 
+                #If the current PDF file size for "doc_output" is at least equal to 
+                #"max_mb_per_pdf_file", a new PDF file will be generated.
                 if (cumulative_pdf_file_size_estimation >= max_mb_per_pdf_file):
+
+                    #The total number of pages outputted in the PDF files will be updated
+                    #after finishing the processing of each "doc_output" object, each of
+                    #which is used to create a PDF output file. This will allow to determine
+                    #which TOC entries belong to the current "doc_output" object, and which
+                    #have already been dealt with in previous PDF files.
+                    total_number_of_processed_pages += len(doc_output)
+
+                    #If a TOC were present in the "Document" object "doc", then the value of "doc_toc"
+                    #wouldn't be an empty list. It would be a list of lists with the following structure:
+                    #"[[lvl_0, title_0, page_0], [[lvl_1, title_1, page_1], ...]", where "lvl" represents
+                    #the hierarchy level of the item, "title" is the title to be displayed for that item
+                    #in the TOC and "page" is the target page number (1-based).
+                    if doc_toc != []:
+                        #The function "process_toc()" will return the list of lists "current_pdf_file_doc_toc", containing
+                        #the TOC information for the PDF file being currently processed, and the list of lists "next_pdf_file_doc_toc" 
+                        #containing the TOC information for the next PDF file to be generated. These lists will only include
+                        #the page numbers for the TOC entries present in the respective PDF files (current or next PDF file), 
+                        #adjusted for the cumulative number of pages already processed, as each PDF file starts at page number one, 
+                        #and a page number of "-1" for deleted pages that are also TOC entries and for TOC entries for which the 
+                        #page number is outside the range of the PDF document.
+                        (current_pdf_file_doc_toc, next_pdf_file_doc_toc, doc_output) = process_toc(
+                            doc_toc,
+                            next_pdf_file_doc_toc,
+                            total_number_of_pages_in_doc,
+                            total_number_of_processed_pages,
+                            doc_output)
 
                     #The "save_pdf()" function will generate a cover page (if the "Cover Page" mode is enabled)
                     #and output the PyMuPDF "Document" object as a PDF file with the corresponding output PDF
@@ -2127,7 +3118,8 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
                     output_pdf_file_number,
                     output_folder_name,
                     output_file_name, 
-                    set_of_potential_blank_pages)
+                    set_of_potential_blank_pages,
+                    current_pdf_file_doc_toc)
 
                     #A new "doc_output" PyMuPDF "Document" object
                     #is instantiated to continue generating the 
@@ -2137,47 +3129,74 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
                     #is reset to zero megabytes, as this is a new PDF file.
                     cumulative_pdf_file_size_estimation = 0
 
-                #The "process_image()" function will extract the image file from the
-                #PDF document as a grayscale Pixmap object, convert it to a NumPy array 
-                #to process it, and then convert the NumPy array back to a Pixmap object,
-                #which will be included in the "doc_output" Document object.
-                (doc_output,
-                cumulative_pdf_file_size_estimation,  
-                list_of_cropped_page_widths, 
-                set_of_potential_blank_pages,
-                list_of_original_document_page_numbers) = process_image(
-                    doc,
-                    doc_output,
-                    page_index, 
-                    dpi_setting,
-                    cumulative_pdf_file_size_estimation,
-                    do_filter_out_splotches_margins,
-                    number_of_standard_deviations_for_filtering_page_color_cropping,
-                    number_of_standard_deviations_for_filtering_page_color,
-                    number_of_standard_deviations_for_filtering_splotches_margins,
-                    do_filter_out_splotches_entire_page,
-                    number_of_standard_deviations_for_filtering_splotches_entire_page,
-                    black_and_white_mode_enabled,
-                    do_crop_pages,        
-                    horizontal_crop_kernel_size_height_percent,
-                    horizontal_crop_kernel_radius_kernel_size_percent,
-                    horizontal_crop_margin_buffer_width_percentage,
-                    vertical_crop_kernel_size_height_percent,
-                    vertical_crop_kernel_radius_kernel_size_percent,
-                    vertical_crop_margin_buffer_height_percentage,
-                    brightness_level,
-                    final_brightness_level,
-                    contrast_level,
-                    final_contrast_level,
-                    is_dark_mode_enabled,
-                    left_margin_width_percent,
-                    right_margin_width_percent,
-                    top_margin_height_percent,
-                    bottom_margin_height_percent,
-                    list_of_cropped_page_widths,
-                    set_of_potential_blank_pages,
-                    list_of_original_document_page_numbers
+                #The "rasterize_image()" function only runs of the user has selected the "a" option
+                #from the main menu ("Generate rasterized PDF (No Crop nor Filter Modifications)"),
+                #in which case the Boolean variable "only_rasterize_pdf_and_remove_pages" would be
+                #set to "True".
+                if only_rasterize_pdf_and_remove_pages:
+                    #The "rasterize_image()" function will extract the image from the current
+                    #page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+                    #array to process it, and then convert the NumPy array back to a Pixmap object,
+                    #which will be included in the "doc_output" Document object.
+                    (doc_output, cumulative_pdf_file_size_estimation) = rasterize_image(
+                        doc,
+                        doc_output,
+                        page_index, 
+                        dpi_setting,
+                        cumulative_pdf_file_size_estimation,
+                        black_and_white_mode_enabled,
+                        is_dark_mode_enabled
                     )
+                #The "process_image()" function only runs of the user hasn't selected the "a" option
+                #from the main menu ("Generate rasterized PDF (No Crop nor Filter Modifications)"),
+                #in which case the Boolean variable "only_rasterize_pdf_and_remove_pages" would be
+                #set to "False".
+                else:
+                    #The "process_image()" function will extract the image from the current
+                    #page of the PDF document as a grayscale Pixmap object, convert it to a NumPy 
+                    #array to process it, and then convert the NumPy array back to a Pixmap object,
+                    #which will be included in the "doc_output" Document object.
+                    (doc_output,
+                    cumulative_pdf_file_size_estimation,  
+                    list_of_cropped_page_widths, 
+                    set_of_potential_blank_pages,
+                    list_of_original_document_page_numbers) = process_image(
+                        doc,
+                        doc_output,
+                        page_index, 
+                        dpi_setting,
+                        cumulative_pdf_file_size_estimation,
+                        do_filter_out_splotches_margins,
+                        number_of_standard_deviations_for_filtering_page_color_cropping,
+                        number_of_standard_deviations_for_filtering_page_color,
+                        number_of_standard_deviations_for_filtering_splotches_margins,
+                        do_filter_out_splotches_entire_page,
+                        number_of_standard_deviations_for_filtering_splotches_entire_page,
+                        black_and_white_mode_enabled,
+                        do_crop_pages,        
+                        horizontal_crop_kernel_size_height_percent,
+                        horizontal_crop_kernel_radius_kernel_size_percent,
+                        horizontal_crop_margin_buffer_width_percentage,
+                        vertical_crop_kernel_size_height_percent,
+                        vertical_crop_kernel_radius_kernel_size_percent,
+                        vertical_crop_margin_buffer_height_percentage,
+                        brightness_level,
+                        final_brightness_level,
+                        contrast_level,
+                        final_contrast_level,
+                        is_dark_mode_enabled,
+                        left_margin_width_percent,
+                        right_margin_width_percent,
+                        top_margin_height_percent,
+                        bottom_margin_height_percent,
+                        list_of_cropped_page_widths,
+                        set_of_potential_blank_pages,
+                        list_of_original_document_page_numbers,
+                        is_image_mode_on,
+                        list_of_page_color_filter_thresholds, 
+                        list_of_full_page_filter_thresholds,
+                        image_mode_multiplier
+                        )
 
                 #The function "display_progress" will display the progress string in the console
                 #and return the estimated number of seconds for the code to complete.
@@ -2186,7 +3205,9 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
                 #"previoous_estimated_seconds" and will be used instead of the current calculation
                 #if it exceeds the previous estimation, so as to avoid the ETA timer increasing 
                 #its estimation.
-                previous_estimated_seconds = display_progress(page_index, first_page, last_page, start_time, previous_estimated_seconds, list_of_individual_removed_pages)
+                previous_estimated_seconds = display_progress(page_index, first_page, last_page,
+                    start_time, previous_estimated_seconds, list_of_individual_removed_pages,
+                    " ETA: 00:00\n\nGenerating final PDF file (this could take a minute).\n")
 
             #As "page_index" is zero-indexed, +1 needs to be added to it when comparing
             #with the first value of "list_of_individual_removed_pages"
@@ -2195,6 +3216,34 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
             #the "list_of_individual_removed_pages" list.
             if list_of_individual_removed_pages != [] and page_index + 1 >= list_of_individual_removed_pages[0]:
                 list_of_individual_removed_pages.pop(0)
+
+        #If a TOC were present in the "Document" object "doc", then the value of "doc_toc"
+        #wouldn't be an empty list. It would be a list of lists with the following structure:
+        #"[[lvl_0, title_0, page_0], [[lvl_1, title_1, page_1], ...]", where "lvl" represents
+        #the hierarchy level of the item, "title" is the title to be displayed for that item
+        #in the TOC and "page" is the target page number (1-based).
+        if doc_toc != []:
+
+            #The total number of pages outputted in the PDF files will be updated
+            #after finishing the processing of each "doc_output" object, each of
+            #which is used to create a PDF output file. This will allow to determine
+            #which TOC entries belong to the current "doc_output" object, and which
+            #have already been dealt with in previous PDF files.
+            total_number_of_processed_pages += len(doc_output)
+
+            #The function "process_toc()" will return the list of lists "current_pdf_file_doc_toc", containing
+            #the TOC information for the PDF file being currently processed, and the list of lists "next_pdf_file_doc_toc" 
+            #containing the TOC information for the next PDF file to be generated. These lists will only include
+            #the page numbers for the TOC entries present in the respective PDF files (current or next PDF file), 
+            #adjusted for the cumulative number of pages already processed, as each PDF file starts at page number one, 
+            #and a page number of "-1" for deleted pages that are also TOC entries and for TOC entries for which the 
+            #page number is outside the range of the PDF document.
+            (current_pdf_file_doc_toc, next_pdf_file_doc_toc, doc_output) = process_toc(
+                doc_toc,
+                next_pdf_file_doc_toc,
+                total_number_of_pages_in_doc,
+                total_number_of_processed_pages,
+                doc_output)
 
         #The "save_pdf()" function will generate a cover page (if the "Cover Page" mode is enabled)
         #and output the PyMuPDF "Document" object as a PDF file with the corresponding output PDF
@@ -2214,7 +3263,8 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
         output_pdf_file_number,
         output_folder_name,
         output_file_name,
-        set_of_potential_blank_pages)  
+        set_of_potential_blank_pages,
+        current_pdf_file_doc_toc)  
 
         #At the end of the code
         doc_output.close()
@@ -2226,7 +3276,14 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
         #very significantly in such a way that their width/height ratio becomes much 
         #smaller than the average text page's aspect ratio. These pages will be listed
         #on-screen for the user to add them to the list of removed pages.
-        if set_of_potential_blank_pages != set():
+
+        #The following "if" statement only runs of the user hasn't selected the "a" option
+        #from the main menu ("Generate rasterized PDF (No Crop nor Filter Modifications)"),
+        #in which case the Boolean variable "only_rasterize_pdf_and_remove_pages" would be
+        #set to "False". Blank pages are only relevant if the user is filtering and cropping
+        #a scanned book PDF document, and none of these operations would take place when
+        #only generating a rasterized PDF document.
+        if not only_rasterize_pdf_and_remove_pages and set_of_potential_blank_pages != set():
             #The function "get_terminal_dimensions()" will return the number of columns 
             #and rows in the console, to allow to properly format the text and dividers.
             columns, lines = get_terminal_dimensions()
@@ -2283,9 +3340,13 @@ def generate_pdf_file(json_settings_dictionary, json_default_settings_dictionary
                 blocked_additional_removed_pages_f_string = textwrap.fill(additional_removed_pages_f_string, width=columns)
                 print(blocked_additional_removed_pages_f_string)
 
-        print("")
-        input("Your PDF has successfully been generated! Press any key to continue.")
-        return json_settings_dictionary
+    print("")
+    if len(pdf_files) > 1:
+        input(f"Your PDF files have been generated successfully! Press any key to continue.")
+    else:
+        input(f"Your PDF file has been generated successfully! Press any key to continue.")
+
+    return json_settings_dictionary
 
 
 #The function "validate_removed_pages()" will validate the inputted list
@@ -2532,17 +3593,23 @@ def load_json_data(json_settings_file_path_name):
             "_comment_28" : do_filter_out_splotches_entire_page_comment_string,
             "Full-Page Filter" : True,
 
-            "_comment_29" : number_of_standard_deviations_for_filtering_page_color_when_cropping_comment_string,
+            "_comment_29" : is_image_mode_on_comment_string,
+            "Image Mode" : False,
+
+            "_comment_30" : number_of_standard_deviations_for_filtering_page_color_when_cropping_comment_string,
             "Page Color Filter Multiplier When Cropping": -1.5,
 
-            "_comment_30" : number_of_standard_deviations_for_filtering_page_color_comment_string,
+            "_comment_31" : number_of_standard_deviations_for_filtering_page_color_comment_string,
             "Page Color Filter Multiplier" : 0.0,
 
-            "_comment_31" : number_of_standard_deviations_for_filtering_splotches_margins_comment_string,
+            "_comment_32" : number_of_standard_deviations_for_filtering_splotches_margins_comment_string,
             "Margins Filter Multiplier" : -0.25,
 
-            "_comment_32" : number_of_standard_deviations_for_filtering_splotches_entire_page_comment_string,
-            "Full-Page Filter Multiplier" : 3.0
+            "_comment_33" : number_of_standard_deviations_for_filtering_splotches_entire_page_comment_string,
+            "Full-Page Filter Multiplier" : 3.0,
+
+            "_comment_34" : number_of_standard_deviations_for_image_mode_comment_string,
+            "Image Mode Multiplier" : -0.85
         }
 
     need_to_generate_new_json_file = False
@@ -2563,7 +3630,6 @@ def load_json_data(json_settings_file_path_name):
             #when displaying the "Removed Pages" setting on-screen.
             if json_settings_dictionary["Removed Pages"] == 0:
                 json_settings_dictionary["Removed Pages"] = ""
-                print("UPDATED DICT!")
                 #The function "atomic_save()" will create a temporary JSON file with the updated changes.
                 #If the files is created successfully, then the files will be swapped. If a problem is 
                 #encountered, the temp file will be unlinked and an error log will be reported.
@@ -4835,6 +5901,106 @@ def set_full_page_filter_multiplier(json_settings_dictionary, json_default_setti
     return json_settings_dictionary
 
 
+#The "image_mode_menu()" function will toggle the "image" mode on or off, 
+#and set the modifier for the threshold cap for the page color and full-page filters.
+def image_mode_menu(json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name):
+
+    global is_in_sub_submenu
+    is_in_sub_submenu = True
+
+    while is_in_sub_submenu:
+        try:
+            #The "clear_screen()" function will clear the CLI screen
+            #using the appropriate command depending on the operating system.
+            clear_screen()
+
+            print("=== Image Mode Menu ===\n\n")
+
+            #The function "get_terminal_dimensions()" will return the number of columns 
+            #and rows in the console, to allow to properly format the text and dividers.
+            columns, lines = get_terminal_dimensions()
+
+            textwrapped_instructions_string = textwrap.fill(number_of_standard_deviations_for_image_mode_comment_string, width=columns)
+            textwrapped_input_string = textwrap.fill(f"Enter the value of the multiplier (-3.00 to +3.00), or select one of the above options:", width=columns)
+
+            if (json_settings_dictionary["Image Mode"]):
+                print("Image mode is currently turned ON.\n")
+            else:
+                print("Image mode is currently turned OFF (Default value).\n")
+
+            print(f"Current Setting: {json_settings_dictionary["Image Mode Multiplier"]} | Default: {json_default_settings_dictionary["Image Mode Multiplier"]}.\n")
+
+            print(textwrapped_instructions_string)
+            print(f"\n[t] Toggle Image Mode On/Off\n[r] Reset to the Default Setting\n[b] Filter Settings Menu\n[m] Main Menu\n[q] Quit\n")
+
+            choice = input(textwrapped_input_string + " ").strip().lower()
+
+            if choice == "":
+                #A continue needs to be used, as we don't want 
+                #the code below the "elif" statements to run,
+                #which would cause a ValueError on int("").
+                continue
+            elif choice == "m":
+                #The function "back_to_main_menu_function()"
+                #will set the Boolean flags "is_in_submenu" and 
+                #"is_in_sub_submenu" to "False", which will break the submenu
+                #"while" loops and return to the main menu.
+                back_to_main_menu_function(json_settings_dictionary)
+                #A continue needs to be used, as we don't want 
+                #the code below the "elif" statements to run,
+                #which would cause a ValueError on int("m").
+                continue
+            elif choice == "b":
+                is_in_sub_submenu = False
+                #A continue needs to be used, as we don't want 
+                #the code below the "elif" statements to run,
+                #which would cause a ValueError on int("b").
+                continue
+            elif choice == "r":
+                #The "reset_to_default_setting()" function will reset the setting to its default value
+                #found while accessing the value of the "json_default_settings_dictionary" dictionary 
+                #with the key "setting_label_key". 
+                #The "True" return value (if used) will break the submenu
+                #loop and allow to return to the main menu or
+                #the nested menu.
+                json_settings_dictionary = reset_to_default_setting("Image Mode Multiplier", json_settings_dictionary, 
+                    json_default_settings_dictionary, json_settings_file_path_name)
+                #A continue needs to be used, as we don't want 
+                #the code below the "elif" statements to run,
+                #which would cause a ValueError on int("r").
+                continue
+            elif choice == "t":
+                #The "toggle_boolean_setting()" function will set the Boolean setting found while accessing
+                #the "json_settings_dictionary" dictionary with the key "setting_label_key" to the opposite
+                #value of the current setting ("True" if the current setting is "False" and vice-versa). 
+
+                #The outcome string will be returned from the "toggle_boolean_setting()" 
+                #function all if the default parameter Boolean flag "do_not_print_results" 
+                #is set to "True", to ensure that the same state of the Filter is printed 
+                #both at the top of the screen (current state) and in the confirmation string.
+                json_settings_dictionary = toggle_boolean_setting("Image Mode", json_settings_dictionary, 
+                    json_settings_file_path_name)
+                #A continue needs to be used, as we don't want 
+                #the code below the "elif" statements to run,
+                #which would cause a ValueError on int("r").
+                continue
+            elif choice == "q":
+                quit_function()
+
+            full_page_filter_multiplier = float(choice)
+            if -3.0 <= full_page_filter_multiplier <= 3.0:
+                #The "set_numeric_setting()" function will set the value of the setting found while accessing
+                #the "json_settings_dictionary" dictionary with the key "setting_label_key" to the provided
+                #value ("setting_value"). 
+                json_settings_dictionary = set_numeric_setting(full_page_filter_multiplier, "Image Mode Multiplier", json_settings_dictionary, 
+                    json_settings_file_path_name)
+            else:
+                input("\nInvalid choice, press any key to continue.")
+        except ValueError:
+            input("\nInvalid choice, press any key to continue.")
+    return json_settings_dictionary
+
+
 #The "filter_settings_menu()" function will run a "while is_in_submenu"
 #loop that will allow the user to navigate the menu, and the loop will 
 #be broken out of when they select the "Quit" option.
@@ -4849,6 +6015,7 @@ def filter_settings_menu(json_settings_dictionary, json_default_settings_diction
         "1": ["Initial Page Color Filter (Required. Removes the background page color)", page_color_filter_menu, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
         "2": ["Margins Filter (Recommended. Helps to properly crop the pages)", margins_filter_menu, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
         "3": ["Full-Page Filter (Optional. Use if any blotches remain in the center of the pages after the 'Initial Page Color Filter' step)", set_full_page_filter_multiplier, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
+        "4": ["Image Mode Menu (Optional. Use if your scanned book contains images)", image_mode_menu, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
         "m": ["Main Menu", back_to_main_menu_function, (json_settings_dictionary,)],
         "q": ["Quit", quit_function, ()]}
 
@@ -4895,7 +6062,7 @@ def set_left_right_kernel_size(json_settings_dictionary, json_default_settings_d
             if (json_settings_dictionary["Auto-Cropping"]):
                 print("Auto-Cropping is currently turned ON (Default value).\n")
             else:
-                print("Auto-Cropping filter is currently turned OFF.\n")
+                print("Auto-Cropping is currently turned OFF.\n")
 
             if (json_settings_dictionary["Auto-Padding"]):
                 print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5017,7 +6184,7 @@ def set_left_right_kernel_radius(json_settings_dictionary, json_default_settings
             if (json_settings_dictionary["Auto-Cropping"]):
                 print("Auto-Cropping is currently turned ON (Default value).\n")
             else:
-                print("Auto-Cropping filter is currently turned OFF.\n")
+                print("Auto-Cropping is currently turned OFF.\n")
 
             if (json_settings_dictionary["Auto-Padding"]):
                 print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5139,7 +6306,7 @@ def set_left_right_safe_margin(json_settings_dictionary, json_default_settings_d
             if (json_settings_dictionary["Auto-Cropping"]):
                 print("Auto-Cropping is currently turned ON (Default value).\n")
             else:
-                print("Auto-Cropping filter is currently turned OFF.\n")
+                print("Auto-Cropping is currently turned OFF.\n")
 
             if (json_settings_dictionary["Auto-Padding"]):
                 print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5272,7 +6439,7 @@ def left_right_crop_settings_menu(json_settings_dictionary, json_default_setting
         if (json_settings_dictionary["Auto-Cropping"]):
             print("Auto-Cropping is currently turned ON (Default value).\n")
         else:
-            print("Auto-Cropping filter is currently turned OFF.\n")
+            print("Auto-Cropping is currently turned OFF.\n")
 
         if (json_settings_dictionary["Auto-Padding"]):
             print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5317,7 +6484,7 @@ def set_top_bottom_kernel_size(json_settings_dictionary, json_default_settings_d
             if (json_settings_dictionary["Auto-Cropping"]):
                 print("Auto-Cropping is currently turned ON (Default value).\n")
             else:
-                print("Auto-Cropping filter is currently turned OFF.\n")
+                print("Auto-Cropping is currently turned OFF.\n")
 
             if (json_settings_dictionary["Auto-Padding"]):
                 print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5439,7 +6606,7 @@ def set_top_bottom_kernel_radius(json_settings_dictionary, json_default_settings
             if (json_settings_dictionary["Auto-Cropping"]):
                 print("Auto-Cropping is currently turned ON (Default value).\n")
             else:
-                print("Auto-Cropping filter is currently turned OFF.\n")
+                print("Auto-Cropping is currently turned OFF.\n")
 
             if (json_settings_dictionary["Auto-Padding"]):
                 print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5561,7 +6728,7 @@ def set_top_bottom_safe_margin(json_settings_dictionary, json_default_settings_d
             if (json_settings_dictionary["Auto-Cropping"]):
                 print("Auto-Cropping is currently turned ON (Default value).\n")
             else:
-                print("Auto-Cropping filter is currently turned OFF.\n")
+                print("Auto-Cropping is currently turned OFF.\n")
 
             if (json_settings_dictionary["Auto-Padding"]):
                 print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5694,7 +6861,7 @@ def top_bottom_crop_settings_menu(json_settings_dictionary, json_default_setting
         if (json_settings_dictionary["Auto-Cropping"]):
             print("Auto-Cropping is currently turned ON (Default value).\n")
         else:
-            print("Auto-Cropping filter is currently turned OFF.\n")
+            print("Auto-Cropping is currently turned OFF.\n")
 
         if (json_settings_dictionary["Auto-Padding"]):
             print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5748,7 +6915,7 @@ def auto_crop_settings_menu(json_settings_dictionary, json_default_settings_dict
         if (json_settings_dictionary["Auto-Cropping"]):
             print("Auto-Cropping is currently turned ON (Default value).\n")
         else:
-            print("Auto-Cropping filter is currently turned OFF.\n")
+            print("Auto-Cropping is currently turned OFF.\n")
 
         if (json_settings_dictionary["Auto-Padding"]):
             print("Auto-Padding is currently turned ON (Default value).\n")
@@ -5844,6 +7011,7 @@ def main_menu(json_settings_dictionary, json_default_settings_dictionary, cwd, j
         "7": ["Contrast Menu", contrast_levels_menu, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
         "8": ["Filters Menu", filter_settings_menu, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
         "9": ["Auto-Cropping Menu", auto_crop_settings_menu, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
+        "a": ["Generate rasterized PDF (No Crop nor Filter Modifications)", generate_pdf_file, (json_settings_dictionary, json_default_settings_dictionary, cwd, True)],
         "r": ["Reset Defaults", reset_all_settings, (json_settings_dictionary, json_default_settings_dictionary, json_settings_file_path_name)],
         "q": ["Quit", quit_function, ()]}
 
@@ -5886,7 +7054,7 @@ def main():
     #If either the "Original Book PDF File" subfolder is missing, or if it is empty,
     #it will be created and the code will exit the application while printing the 
     #"missing_pdf_string" on-screen.
-    missing_pdf_string = "\n" + textwrap.fill("Please add the scanned book's PDF file in the 'Original Book PDF File' subfolder of the Analog eBooks folder and launch the application again.", width=columns) + "\n"     
+    missing_pdf_string = "\n" + textwrap.fill("Please add a PDF file in the 'Original Book PDF File' subfolder of the Analog eBooks folder and launch the application again.", width=columns) + "\n"     
     if not os.path.exists(os.path.join(cwd, "Original Book PDF File")):
         os.mkdir(os.path.join(cwd, "Original Book PDF File"))
         sys.exit(missing_pdf_string)
@@ -5913,6 +7081,7 @@ def main():
 if __name__ == '__main__':
 
     try:
+
         #The strings below will be used as comments in the JSON file
         #and in the menus, so they are instantiated as global variables.
         first_page_comment_stirng = "The 'First Page' is the first page from the original PDF document that is included in your final PDF document (default setting: 1)."
@@ -5971,6 +7140,8 @@ if __name__ == '__main__':
 
         do_filter_out_splotches_entire_page_comment_string = "The 'Full-Page Filter' setting will filter out grayscale pixels that are lighter than the mean non-white pixel value on the center of the page, plus the product of the standard deviation of the non-white pixels by the value of 'Full-Page Filter Multiplier' (i.e., mean + 'Full-Page Filter Multiplier' * standard deviation), where a normal distribution of non-white pixel values is assumed (default setting: True)."
 
+        is_image_mode_on_comment_string = "The 'Image Mode' setting will set a cap on the pixels that will be set to white when filtering out the page color and applying the full-page filter step afterwards. This mode will prevent pages with images, which have an average grayscale pixel value that is significantly darker than pages containing only text, from becoming faded during these filter steps (default setting: False)."
+
         number_of_standard_deviations_for_filtering_page_color_comment_string = "The 'Page Color Filter Multiplier' will determine the number of standard deviations (the number may be positive or negative, and may contain decimals) that will be added to the initial mean value of all pixels on the page when filtering out pixel values greater (lighter) than: mean + 'Page Color Filter Multiplier' * standard deviation, assuming a normal distribution of pixel values (0.0 being black and 1.0 being white), where the pixel values are distributed within 3 standard deviations on either side of the mean. A value of 'Page Color Filter Multiplier' of zero will give the mean as a threshold, while positive values up to +3.0 will keep more and more original pixels, and negative values -3.0 and over will filter out pixels more aggressively (default setting: 0.0)."
 
         number_of_standard_deviations_for_filtering_page_color_when_cropping_comment_string = "The 'Page Color Filter Multiplier When Cropping' is only used when cropping the pages and will not affect the appearance of the text. It will determine the number of standard deviations (the number may be positive or negative, and may contain decimals) that will be added to the initial mean value of all pixels on the page when filtering out pixel values greater (lighter) than: mean + 'Page Color Filter Multiplier When Cropping' * standard deviation, assuming a normal distribution of pixel values (0.0 being black and 1.0 being white), where the pixel values are distributed within 3 standard deviations on either side of the mean. A value of 'Page Color Filter Multiplier' of zero will give the mean as a threshold, while positive values up to +3.0 will keep more and more original pixels, and negative values -3.0 and over will filter out pixels more aggressively. In this case, as the text must be blemish-free when cropping it, a more aggressive value of -1.5 is used (default setting: -1.5)."
@@ -5978,6 +7149,8 @@ if __name__ == '__main__':
         number_of_standard_deviations_for_filtering_splotches_margins_comment_string =  "The 'Margins Filter Multiplier' will determine the number of standard deviations (the number may be positive or negative, and may contain decimals) that will be added to the mean non-white pixel value on the center of the page when filtering out pixel values in the margins greater (lighter) than: mean + 'Margins Filter Multiplier' * standard deviation, assuming a normal distribution of non-white pixel values (0.0 being black and 1.0 being white), where the pixel values are distributed within 3 standard deviations on either side of the mean. A value of 'Margins Filter Multiplier' of zero will give the mean as a threshold, while positive values up to +3.0 will keep more and more original pixels, and negative values -3.0 and over will filter out pixels more aggressively (default setting: -0.25)."
 
         number_of_standard_deviations_for_filtering_splotches_entire_page_comment_string = "The 'Full-Page Filter Multiplier' will determine the number of standard deviations (the number may be positive or negative, and may contain decimals) that will be added to the mean non-white pixel value on the center of the page when filtering out pixel values greater (lighter) than: mean + 'Full-Page Filter Multiplier' * standard deviation, assuming a normal distribution of non-white pixel values (0.0 being black and 1.0 being white), where the pixel values are distributed within 3 standard deviations on either side of the mean. A value of 'Full-Page Filter Multiplier' of zero will give the mean as a threshold, while positive values up to +3.0 will keep more and more original pixels, and negative values -3.0 and over will filter out pixels more aggressively (default setting: 3.0)."
+
+        number_of_standard_deviations_for_image_mode_comment_string = "The 'Image Mode Multiplier' will determine the number of standard deviations (the number may be positive or negative, and may contain decimals) that will be added to the mean threshold above which the pixels will be set to white when filtering out the page color and applying the full-page filter afterwards. The threshold values are distributed within 3 standard deviations on either side of the mean. A value of 'Image Mode Multiplier' of zero will give the mean threshold as a threshold, while positive values up to +3.0 will keep more and more original pixels, and negative values -3.0 and over will filter out pixels more aggressively (default setting: -0.85)."
 
         colors_dict = {
             (255, 255, 255) : "White",
@@ -6018,6 +7191,4 @@ if __name__ == '__main__':
 
         #Exit with error code
         sys.exit(1)
-
-
 
